@@ -9,12 +9,15 @@ it. That is three round trips and a cleanup step for a question that takes one.
 
 ## Install
 
-```sh
-pi install /path/to/pi-probe
+```bash
+pi install git:github.com/udit-001/pi-probe
 ```
 
 Needs [uv](https://docs.astral.sh/uv/) on your `PATH`. Nothing else; the
 interpreter, the virtual environment, and the packages are uv's problem.
+
+Install anywhere in the project or globally, then say `probe` — the tool
+appears in the agent's list on the next turn.
 
 ## What you get
 
