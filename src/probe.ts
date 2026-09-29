@@ -28,6 +28,12 @@ export interface RunProbeOptions {
 	parentEnv?: Readonly<Record<string, string | undefined>>;
 	/** Env names a human blessed in probe.config.json. */
 	extraEnv?: readonly string[];
+	/**
+	 * The per-session probe workspace. Exposed to the cell as WORKSPACE so an
+	 * expensive step survives across probes; ownership of the directory (create,
+	 * wipe) stays with the caller.
+	 */
+	workspace?: string;
 	/** Injected in tests; production always spawns uv. */
 	command?: string;
 	commandArgs?: readonly string[];
@@ -171,7 +177,9 @@ function killTree(child: ChildProcess): void {
  * Every call is a fresh process with an empty namespace, so there is no state
  * to inherit and nothing to reset. That is the whole contract: a probe that
  * reads a variable it did not define is impossible rather than merely
- * unlikely.
+ * unlikely. The one explicit exception is the workspace it is handed: a
+ * directory it may read and write, which outlives the call when the caller
+ * keeps it alive.
  */
 export async function runProbe(options: RunProbeOptions): Promise<ProbeOutcome> {
 	const {
@@ -196,6 +204,7 @@ export async function runProbe(options: RunProbeOptions): Promise<ProbeOutcome> 
 			// Unbuffered so stdout and stderr interleave in the order written.
 			PYTHONUNBUFFERED: "1",
 			PYTHONIOENCODING: "utf-8",
+			...(options.workspace ? { PI_PROBE_WORKSPACE: options.workspace } : {}),
 		},
 	});
 

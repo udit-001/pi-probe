@@ -318,3 +318,65 @@ describe("explaining a timeout, directly", () => {
 		assert.doesNotMatch(text, /cannot read your credentials/);
 	});
 });
+
+/**
+ * The collapsed line is what a human supervising a run actually reads. It used
+ * to be the first line of `render`, which is always the status line, so every
+ * probe looked like `ok (595ms)` with the answer hidden behind an expand.
+ */
+describe("the collapsed view a human reads", () => {
+	const theme = { fg: (_color: string, text: string) => text };
+
+	const collapsedLines = async (details: Record<string, unknown>) => {
+		const { tool } = await loadTool();
+		return tool.renderResult({ details }, { expanded: false }, theme).render() as string[];
+	};
+
+	const base = {
+		stdout: "",
+		stderr: "",
+		exitCode: 0,
+		timedOut: false,
+		aborted: false,
+		droppedEnv: ["GITHUB_TOKEN"],
+		durationMs: 595,
+		declaredDeps: 0,
+		codeStarted: true,
+		spawnError: undefined,
+	};
+
+	it("shows the value, not just the receipt", async () => {
+		const lines = await collapsedLines({ ...base, stdout: "{'providers': 225}\n" });
+		assert.deepEqual(lines, ["ok (595ms)", "  {'providers': 225}"]);
+	});
+
+	it("keeps the last lines, where a probe's answer lives", async () => {
+		const stdout = Array.from({ length: 8 }, (_, i) => `line${i + 1}`).join("\n") + "\n";
+		const lines = await collapsedLines({ ...base, stdout });
+		assert.deepEqual(lines, ["ok (595ms)", "... 5 earlier lines, expand for all", "  line6", "  line7", "  line8"]);
+	});
+
+	it("shows the traceback when the probe failed", async () => {
+		const lines = await collapsedLines({ ...base, exitCode: 1, stderr: "ValueError: boom\n" });
+		assert.deepEqual(lines, ["Exited 1 (595ms)", "  ValueError: boom"]);
+	});
+
+	it("does not let the environment note stand in for a missing answer", async () => {
+		const lines = await collapsedLines(base);
+		assert.deepEqual(lines, ["ok (595ms)"]);
+	});
+
+	it("keeps the two-sentence timeout advice on one line", async () => {
+		const lines = await collapsedLines({ ...base, timedOut: true, codeStarted: false, declaredDeps: 2 });
+		assert.equal(lines.length, 1);
+		const only = lines[0] ?? "";
+		assert.ok(only.length <= 80, `expected one short line, got ${only.length} chars`);
+	});
+
+	it("expands to the same text the model reads", async () => {
+		const details = { ...base, stdout: "{'providers': 225}\n" };
+		const { tool } = await loadTool();
+		const expanded = tool.renderResult({ details }, { expanded: true }, theme).render().join("\n");
+		assert.equal(expanded, render(details as any));
+	});
+});

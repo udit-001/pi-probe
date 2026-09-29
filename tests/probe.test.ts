@@ -9,11 +9,63 @@ const here = process.cwd();
 const run = (code: string, extra: Record<string, unknown> = {}) =>
 	runProbe({ code, cwd: here, ...extra });
 
+/** A real scratch directory shared by two probes, like a session workspace. */
+const sharedWorkspace = async () => {
+	const ws = await mkdtemp(join(tmpdir(), "pi-probe-ws-"));
+	return ws;
+};
+
 describe("runProbe", () => {
 	it("returns the value of the trailing expression", async () => {
 		const r = await run("x = 6\nx * 7\n");
 		assert.equal(r.exitCode, 0);
 		assert.equal(r.stdout.trim(), "42");
+	});
+
+	it("never lets WORKSPACE fall back to the project directory", async () => {
+		const r = await run('import os\nprint(WORKSPACE)\n');
+		assert.equal(r.exitCode, 0);
+		const ws = r.stdout.trim();
+		assert.notEqual(ws, here); // not cwd: a silent probe write must not litter the project
+		assert.ok(ws.startsWith("/tmp/pi-probe-") || ws.startsWith(process.env.TMPDIR ?? "/tmp/"));
+	});
+
+	it("exposes the workspace to the cell as WORKSPACE and as an env var", async () => {
+		const ws = await sharedWorkspace();
+		try {
+			const r = await run(
+				'import os\nprint(WORKSPACE == os.environ.get("PI_PROBE_WORKSPACE"))\nprint(WORKSPACE == ' + JSON.stringify(ws) + ")\n",
+				{ workspace: ws },
+			);
+			assert.equal(r.exitCode, 0);
+			assert.deepEqual(r.stdout.trim().split("\n"), ["True", "True"]);
+		} finally {
+			await rm(ws, { recursive: true, force: true });
+		}
+	});
+
+	it("carries a file across two probes through the workspace", async () => {
+		const ws = await sharedWorkspace();
+		try {
+			const first = await run(
+				"import json, os\n" +
+					`with open(os.path.join(WORKSPACE, "models.json"), "w") as f: json.dump({"seen": 42}, f)\n` +
+					"print(WORKSPACE)\n",
+				{ workspace: ws },
+			);
+			assert.equal(first.exitCode, 0);
+
+			const second = await run(
+				"import json, os\n" +
+					`with open(os.path.join(WORKSPACE, "models.json")) as f: data = json.load(f)\n` +
+					"print(data['seen'])\n",
+				{ workspace: ws },
+			);
+			assert.equal(second.exitCode, 0);
+			assert.equal(second.stdout.trim(), "42");
+		} finally {
+			await rm(ws, { recursive: true, force: true });
+		}
 	});
 
 	it("captures stdout and stderr separately", async () => {

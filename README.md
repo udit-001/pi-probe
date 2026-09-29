@@ -1,7 +1,8 @@
 # pi-probe
 
 A pi tool for asking Python one question. One call runs a standalone cell,
-prints the value of its last expression, and forgets everything.
+prints the value of its last expression, and forgets everything you did not
+save to WORKSPACE.
 
 The alternative is writing a file, running it, reading the output, and deleting
 it. That is three round trips and a cleanup step for a question that takes one.
@@ -19,8 +20,9 @@ interpreter, the virtual environment, and the packages are uv's problem.
 
 - **One call per question.** The value of the last expression comes back, so
   the cell ends with the thing you wanted to see instead of a `print()`.
-- **A clean process every time.** Nothing carries over, so nothing needs
-  resetting and a result never depends on what ran before it.
+- **A clean process every time.** Nothing carries over except what you save
+  to WORKSPACE — no reset, no stale state, and a result never depends on
+  what ran before it.
 - **Real packages, cheaply.** Declare them in a header and uv resolves and
   caches them. A cold `pandas` costs about four seconds here; the environment
   is reused from then on.
@@ -51,7 +53,26 @@ without wrapping it. An expression indented inside a `for`, `if`, or `try`
 block is not top-level, and prints nothing.
 
 Cells are independent. If the third one needs the DataFrame the second one
-built, it has to build it again.
+built, it has to build it again — or park it in WORKSPACE once and read it
+back.
+
+`WORKSPACE` points at a scratch directory tied to the pi session: same
+session, same directory, so a resumed conversation still finds its data
+until the OS cleans the temp dir, and a new session starts with fresh
+scratch. Do an expensive step once and reuse it:
+
+```python
+import json, os
+p = os.path.join(WORKSPACE, "models.json")
+with open(p, "w") as f: json.dump(data, f)   # first probe
+
+data = json.load(open(p))                     # later probes
+```
+
+Workspace files carry the trust of whoever wrote them: fetched data is still
+remote data. The directory is mode `0700`, re-validated on every call, and a
+pre-planted symlink or a directory you do not own is refused (fresh random
+fallback). Workspaces left untouched for two weeks are pruned automatically.
 
 ## Configuration
 
@@ -74,31 +95,10 @@ the error names this file.
 names are refused even when you list them, so this is for a proxy or a colour
 setting, never a token.
 
-## What a probe is not
-
-It is a gate on how code is *declared*, not a sandbox.
-
-A probe runs as you, in your working directory. It can open any file you can
-open, including `~/.aws/credentials` and `~/.netrc`. It can also shell out to
-`uv pip install` and skip the confirmation entirely. The checks here close the
-channel a model reaches by accident while trying to help you; they do nothing
-about code that goes looking for another way.
-
-If you need a guarantee rather than a default, run pi in a container.
-
-The Windows process-kill path is implemented (`taskkill /T /F`) but the test
-suite only runs on Linux, so treat it as unverified there.
-
 ## Working on it
 
-```sh
-npm install
-npm test        # 92 tests, real Python, real uv
-npm run typecheck
-```
-
-`src/probe.ts` owns the machinery behind one call. `src/env.ts` and
-`src/deps.ts` are the two security seams, each testable on its own. `index.ts`
-is the adapter that registers the tool.
+Security model, invariants, module map, and the dev workflow live in
+[AGENTS.md](AGENTS.md) -- agents get them automatically; the README stays
+user-facing.
 
 MIT.

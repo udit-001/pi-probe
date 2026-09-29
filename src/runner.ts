@@ -29,13 +29,27 @@
  */
 export function buildRunner(userPath: string, metadataBlock: string, startedPath?: string): string {
 	const preamble = `import ast as _pa, os as _po, sys as _ps
+
+# The probe workspace: the one thing that outlives a probe. WORKSPACE is a
+# tool-owned scratch directory that survives until the session ends, so an
+# expensive step (a fetch, a slow parse) can run once, land here, and be read
+# back by later probes. The agent reaches for it by name; nothing else from a
+# previous probe is in reach.
 _P = ${JSON.stringify(userPath)}
+
+# Without a provider (no session behind the call) WORKSPACE falls back to this
+# run's own scratch directory -- writable, but gone when the run ends. It must
+# never fall back to the working directory: a probe that writes somewhere
+# "safe" unknowingly would litter the project the user is actually working in.
+WORKSPACE = _po.environ.get("PI_PROBE_WORKSPACE") or _po.path.dirname(_P)
 ${startedPath ? `open(${JSON.stringify(startedPath)}, "w").close()` : "pass"}
 _po.sys.path.insert(0, _po.getcwd())
 _src = open(_P, encoding="utf-8").read()
 _tree = _pa.parse(_src, _P)
 _last = _tree.body.pop().value if _tree.body and isinstance(_tree.body[-1], _pa.Expr) else None
-_ns = {"__name__": "__main__", "__file__": _P}
+# User code runs in its own namespace, so WORKSPACE must be handed in -- it
+# is not a runner global the cell can see by accident.
+_ns = {"__name__": "__main__", "__file__": _P, "WORKSPACE": WORKSPACE}
 try:
     exec(compile(_tree, _P, "exec"), _ns)
     if _last is not None:

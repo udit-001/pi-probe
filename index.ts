@@ -9,7 +9,11 @@
  * Every call is a new process with an empty namespace, so a probe cannot read
  * a variable it did not define. That is what makes it safe to hand a model a
  * tool for scribbling on: there is no residue to reason about, and no reset
- * to forget.
+ * to forget. The one explicit exception is the session workspace -- a
+ * directory keyed by the pi session id, which the cell reaches through the
+ * WORKSPACE constant. It holds whatever an expensive step left for later
+ * probes in the same conversation, and dies with the OS's temp policy, not
+ * with the process.
  */
 
 import { readFile } from "node:fs/promises";
@@ -19,6 +23,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Type } from "typebox";
 import { authorizeDeps, readDeclaredDeps } from "./src/deps.ts";
 import { DEFAULT_TIMEOUT_SEC, MAX_TIMEOUT_SEC, runProbe, type ProbeOutcome } from "./src/probe.ts";
+import { resolveWorkspace } from "./src/workspace.ts";
 
 const ProbeParams = Type.Object({
 	code: Type.String({
@@ -82,14 +87,24 @@ async function loadConfig(): Promise<ResolvedConfig> {
 const DESCRIPTION = `Run throwaway Python and get the answer, in one call.
 
 Use this to check a value, see how a library behaves, inspect data, or try an idea
-before writing it into a file. The code is self-contained and each call starts
-from a clean process.
+before writing it into a file. For edits use edit; for code that is not throwaway,
+write a file and run it.
 
-The value of a final top-level expression is printed for you, so end with the thing
-you want to see rather than wrapping it in print(). An expression indented inside
-a for, if, or try block is not top-level and prints nothing.
+Fresh every call: each probe is a new process with an empty namespace. WORKSPACE is
+the one thing the tool carries between calls -- a scratch directory tied to this
+session, which survives a resume until the OS cleans the temp dir; a new session
+gets fresh scratch. Do an expensive step once (a fetch, a slow parse), write its
+result there, and read it back in later probes instead of redoing the step:
 
-To use third-party packages, declare them in a header at the very top:
+    with open(os.path.join(WORKSPACE, "models.json"), "w") as f: json.dump(data, f)
+    data = json.load(open(os.path.join(WORKSPACE, "models.json")))
+
+End with the thing you want to see. The value of the last expression is printed
+for you when it is top-level, so you need no print() around it. An expression
+indented inside a for, if, or try block is not top-level and prints nothing.
+
+Third-party packages go in a PEP 723 header at the very top, and you approve each
+new package once per session (URLs and local paths are refused):
 
     # /// script
     # dependencies = ["pandas"]
@@ -97,10 +112,26 @@ To use third-party packages, declare them in a header at the very top:
     import pandas as pd
     print(pd.read_csv("data.csv").shape)
 
-Returns stdout, stderr, and the value of the last expression. Packages you have
-not approved before are confirmed with the user first.
+The environment is stdlib Python under uv. A fetch is plain urllib; a server that
+answers 403 usually wants a browser User-Agent header. A crash still returns
+everything printed before it, so fix the tail and rerun instead of rewriting the
+whole probe.`;
 
-For edits use edit. For code that is not throwaway, write a file and run it.`;
+/**
+ * The stable identity a workspace is keyed to: the pi session id, falling
+ * back to the session file path (also stable across a resume), then nothing
+ * (headless/print modes), which yields a fresh random directory per call.
+ */
+function workspaceIdentity(ctx: ExtensionContext): string | undefined {
+	if (typeof ctx.sessionManager?.getSessionId === "function") {
+		const id = ctx.sessionManager.getSessionId();
+		if (id) return id;
+	}
+	if (typeof ctx.sessionManager?.getSessionFile === "function") {
+		return ctx.sessionManager.getSessionFile() ?? undefined;
+	}
+	return undefined;
+}
 
 export default function (pi: ExtensionAPI) {
 	// Approved-for-this-session package names. Cleared per session so a yes in
@@ -121,10 +152,10 @@ export default function (pi: ExtensionAPI) {
 		name: "probe",
 		label: "Python probe",
 		description: DESCRIPTION,
-		promptSnippet: "probe: run throwaway Python for an answer, in a fresh process",
+		promptSnippet: "probe: run throwaway Python for an answer, in a fresh process; WORKSPACE carries scratch between calls",
 		promptGuidelines: [
 			"Prefer probe over write-then-run when the code is throwaway: it is one call instead of three.",
-			"Each probe is independent; restate whatever a probe needs rather than expecting a predecessor.",
+			"Do an expensive step once and reuse it across probes: write the result to WORKSPACE, read it back in the next probe. Everything else restarts each call.",
 		],
 		parameters: ProbeParams,
 		// Cells are independent, so parallel calls are safe and a batch of
@@ -172,6 +203,9 @@ export default function (pi: ExtensionAPI) {
 				timeoutSec: params.timeout,
 				signal,
 				extraEnv: config.extraEnv,
+				// Resolved per invocation: a resumed session resolves to the same
+				// verified directory, so its data is still there to reuse.
+				workspace: await resolveWorkspace(workspaceIdentity(ctx)),
 			});
 
 			if (outcome.spawnError) throw new Error(outcome.spawnError);
@@ -183,56 +217,107 @@ export default function (pi: ExtensionAPI) {
 			return { content: [{ type: "text", text: render(outcome) }], details };
 		},
 
-		// Reuses the same text the model reads, rather than re-deriving the
-		// status line and the trailing-newline trim in a second place.
+		// Both views are built from one decomposition of the outcome, so the
+		// status line, the trailing-newline trim, and the stderr label are each
+		// decided once.
 		renderResult(result, { expanded }, theme) {
-			const text = render(result.details as ProbeOutcome);
-			if (expanded) return lines(text);
-			const first = text.split("\n").find((line) => line.trim()) ?? "probe";
-			return lines(theme.fg("dim", first.slice(0, 80)));
+			const parts = renderParts(result.details as ProbeOutcome);
+			if (expanded) return lines(joinParts(parts));
+			return lines(...collapsed(parts, text => theme.fg("dim", text)));
 		},
 	});
 }
 
+const COLLAPSED_TAIL_LINES = 3;
+
+/**
+ * The collapsed TUI line: status, then the tail of the answer.
+ *
+ * A probe's answer is its last line, so the tail is the value and the status
+ * line is only a receipt. Leading with the receipt is what made a human
+ * supervising a run see `ok (595ms)` and nothing else. Same shape as bash,
+ * which previews the tail of real output rather than the exit code.
+ */
+function collapsed(parts: RenderParts, dim: (text: string) => string): string[] {
+	// The status line is capped like the old first-line view: the timeout advice
+	// is two sentences, and a two-sentence collapsed line defeats the point of
+	// collapsing. The full text is one expand away.
+	const out = [dim(parts.status.length > 80 ? `${parts.status.slice(0, 79)}…` : parts.status)];
+	// stderr outranks stdout: a failing probe usually prints the traceback and
+	// nothing else, and that traceback is the whole diagnosis. The dropped-env
+	// note never appears here -- it is a standing fact about the sandbox, not a
+	// per-run result, and on a silent probe it would be the only thing shown.
+	const body = parts.stderr || parts.stdout;
+	if (!body) return out;
+	const all = body.split("\n");
+	const tail = all.slice(-COLLAPSED_TAIL_LINES);
+	out.push(...tail.map(line => `  ${line}`));
+	// Only worth saying when there is something above the cut to see.
+	if (all.length > tail.length) {
+		out.splice(1, 0, dim(`... ${all.length - tail.length} earlier lines, expand for all`));
+	}
+	return out;
+}
+
 /** Shape one probe's outcome as the text the model reads. Exported for tests. */
 export function render(outcome: ProbeOutcome): string {
-	const parts: string[] = [];
+	return joinParts(renderParts(outcome));
+}
+
+/** The one place that decides labels and blank lines, so no caller has to. */
+function joinParts({ status, stdout, stderr, note }: RenderParts): string {
+	return [status, stdout, stderr && `stderr:\n${stderr}`, note].filter(Boolean).join("\n\n");
+}
+
+/**
+ * A probe's outcome split by role, so a view picks by name and never by
+ * position. Empty string means absent; `joinParts` is what turns that back
+ * into text, and it owns the labels.
+ */
+interface RenderParts {
+	status: string;
+	stdout: string;
+	stderr: string;
+	note: string;
+}
+
+function renderParts(outcome: ProbeOutcome): RenderParts {
+	let status: string;
 
 	if (outcome.timedOut) {
 		// Timed out installing and timed out computing need opposite advice.
 		// The runner touches a marker file the instant user code starts, so this
 		// is a fact rather than a guess about what uv printed.
 		const spentInstalling = !outcome.codeStarted && outcome.declaredDeps > 0;
-		parts.push(
+		status =
 			spentInstalling
 				? `Timed out after ${Math.round(outcome.durationMs / 1000)}s before the code ran. ` +
 						`${outcome.declaredDeps} package(s) were declared, so the budget went to ` +
 						"installing them. Retry with a higher timeout; the install is cached, so the " +
 						"retry gets the whole budget for the code."
 				: `Timed out after ${Math.round(outcome.durationMs / 1000)}s and was killed. ` +
-						"Raise the timeout if the work is legitimate, or narrow the code.",
-		);
+						"Raise the timeout if the work is legitimate, or narrow the code.";
 	} else if (outcome.aborted) {
-		parts.push("Cancelled before it finished.");
+		status = "Cancelled before it finished.";
 	} else if (outcome.exitCode === 0) {
-		parts.push(`ok (${outcome.durationMs}ms)`);
+		status = `ok (${outcome.durationMs}ms)`;
 	} else {
-		parts.push(`Exited ${outcome.exitCode} (${outcome.durationMs}ms)`);
+		status = `Exited ${outcome.exitCode} (${outcome.durationMs}ms)`;
 	}
 
-	if (outcome.stdout) parts.push(outcome.stdout.replace(/\n$/, ""));
-	// uv writes install and resolution progress here, so it is only worth
-	// showing when something actually went wrong or needs installing.
-	if (outcome.stderr.trim()) parts.push(`stderr:\n${outcome.stderr.replace(/\n$/, "")}`);
-	if (outcome.droppedEnv.length > 0) {
-		// Scoped claim on purpose. The environment is built from a fixed list,
-		// so a probe cannot read these -- but it runs as you and can still open
-		// a file under your home directory, which is a different thing entirely.
-		parts.push(
-			`Note: probe did not pass through ${outcome.droppedEnv.join(", ")}, so its ` +
-				"environment does not carry those values.",
-		);
-	}
-
-	return parts.join("\n\n");
+	return {
+		status,
+		stdout: outcome.stdout.replace(/\n$/, ""),
+		// uv writes install and resolution progress here, so it is only worth
+		// showing when something actually went wrong or needs installing.
+		stderr: outcome.stderr.trim() ? outcome.stderr.replace(/\n$/, "") : "",
+		note:
+			outcome.droppedEnv.length > 0
+				? // Scoped claim on purpose. The environment is built from a fixed list,
+					// so a probe cannot read these -- but it runs as you and can still open
+					// a file under your home directory, which is a different thing entirely.
+					`Note: probe did not pass through ${outcome.droppedEnv.join(", ")}, so its ` +
+					"environment does not carry those values."
+				: "",
+	};
 }
