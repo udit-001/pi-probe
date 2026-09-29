@@ -1,8 +1,9 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { extractScriptMetadata } from "./deps.ts";
+import { buildMetadataBlock, readDeclaredDeps, readRequiresPython } from "./deps.ts";
 import { buildChildEnv } from "./env.ts";
 import { buildRunner } from "./runner.ts";
 
@@ -44,7 +45,21 @@ export interface ProbeOutcome {
 	truncated: boolean;
 	/** Environment variables the policy refused to hand over. */
 	droppedEnv: string[];
+	/** How many packages the cell declared. Used to explain a timeout. */
+	declaredDeps: number;
+	/**
+	 * Whether the interpreter reached the user's code at all. False after a
+	 * timeout means the budget went to uv, not to the cell.
+	 */
+	codeStarted: boolean;
 	durationMs: number;
+}
+
+/** Decode bytes, dropping a UTF-8 sequence cut in half by a byte boundary. */
+function decodeTruncated(buf: Buffer): string {
+	let end = buf.length;
+	while (end > 0 && (buf[end - 1] as number) >= 0x80 && (buf[end - 1] as number) < 0xc0) end--;
+	return buf.subarray(0, end).toString("utf8");
 }
 
 /**
@@ -53,10 +68,14 @@ export interface ProbeOutcome {
  * Head-and-tail, not head-only, because the part of a probe that matters is
  * almost always at the end: the value of the last expression, or the error
  * that stopped it. Dropping the tail to save memory throws away the answer.
+ *
+ * Everything is counted in bytes and held as bytes. Counting bytes while
+ * slicing characters mixes the two units, and the omitted-byte count drifts
+ * negative when it does.
  */
 class CappedBuffer {
-	private head: string[] = [];
-	private tail = "";
+	private head: Buffer[] = [];
+	private tail: Buffer = Buffer.alloc(0);
 	private headBytes = 0;
 	private totalBytes = 0;
 	private readonly headCap: number;
@@ -69,28 +88,22 @@ class CappedBuffer {
 		this.tailCap = cap - this.headCap;
 	}
 
-	push(chunk: string): void {
-		const size = Buffer.byteLength(chunk, "utf8");
-		this.totalBytes += size;
+	push(chunk: string | Buffer): void {
+		const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, "utf8");
+		this.totalBytes += buf.length;
 
-		if (this.headBytes < this.headCap) {
-			const room = this.headCap - this.headBytes;
-			if (size <= room) {
-				this.head.push(chunk);
-				this.headBytes += size;
-			} else {
-				// Split a chunk that straddles the boundary so bytes are not lost.
-				const cut = Buffer.from(chunk, "utf8").subarray(0, room).toString("utf8");
-				this.head.push(cut);
-				this.headBytes += Buffer.byteLength(cut, "utf8");
-				this.tail = chunk.slice(cut.length);
-			}
+		const room = this.headCap - this.headBytes;
+		if (room > 0) {
+			const kept = buf.subarray(0, Math.min(room, buf.length));
+			this.head.push(kept);
+			this.headBytes += kept.length;
+			this.tail = buf.length > kept.length ? buf.subarray(kept.length) : this.tail;
 		} else {
-			this.tail += chunk;
+			this.tail = Buffer.concat([this.tail, buf]);
 		}
 
 		if (this.tail.length > this.tailCap * 2) {
-			this.tail = this.tail.slice(-this.tailCap);
+			this.tail = this.tail.subarray(this.tail.length - this.tailCap);
 		}
 	}
 
@@ -99,10 +112,13 @@ class CappedBuffer {
 	}
 
 	text(): string {
-		if (!this.overflowed) return this.head.join("");
-		const omitted = this.totalBytes - Buffer.byteLength(this.head.join(""), "utf8") -
-			Buffer.byteLength(this.tail, "utf8");
-		return `${this.head.join("")}\n[... ${omitted} bytes omitted ...]\n${this.tail}`;
+		if (!this.overflowed) return decodeTruncated(Buffer.concat(this.head));
+		const omitted = this.totalBytes - this.headBytes - this.tail.length;
+		return [
+			decodeTruncated(Buffer.concat(this.head)),
+			`[... ${omitted} bytes omitted ...]`,
+			this.tail.toString("utf8"),
+		].join("\n");
 	}
 }
 
@@ -114,15 +130,19 @@ class CappedBuffer {
  * retry is not speculative: an earlier swallowed failure here left an empty
  * directory behind with nothing in the logs to say so.
  */
-async function removeScratch(dir: string): Promise<void> {
+async function removeScratch(dir: string): Promise<boolean> {
 	for (let attempt = 0; attempt < 5; attempt++) {
 		try {
 			await rm(dir, { recursive: true, force: true });
-			return;
+			return true;
 		} catch {
 			await new Promise((resolve) => setTimeout(resolve, 20 * (attempt + 1)));
 		}
 	}
+	// Say so once. The alternative -- returning quietly -- is how an empty
+	// directory survived a whole test run with nothing in the logs to explain it.
+	console.error(`pi-probe: could not remove its scratch directory ${dir}`);
+	return false;
 }
 
 /** Kill the process and anything it spawned. */
@@ -182,19 +202,29 @@ export async function runProbe(options: RunProbeOptions): Promise<ProbeOutcome> 
 	const dir = await mkdtemp(join(tmpdir(), "pi-probe-"));
 	const userPath = join(dir, "probe.py");
 	const runnerPath = join(dir, "runner.py");
+	const startedPath = join(dir, "started");
 	const started = Date.now();
 
 	const stdout = new CappedBuffer(MAX_OUTPUT_BYTES);
 	const stderr = new CappedBuffer(MAX_OUTPUT_BYTES);
+	const deps = readDeclaredDeps(code);
 	let timedOut = false;
 	let aborted = false;
 	let spawnError: string | undefined;
+
+	// A signal that is already aborted never fires `abort` at a listener added
+	// afterwards, so without this the run would sail to the full timeout.
+	if (signal?.aborted) {
+		aborted = true;
+	}
 
 	try {
 		await writeFile(userPath, code, { encoding: "utf8", mode: 0o600 });
 		await writeFile(
 			runnerPath,
-			buildRunner(userPath, extractScriptMetadata(code) ?? ""),
+			// Rebuilt from the parsed dependencies, not forwarded: a `[tool.uv]`
+			// index override in the source must never redirect resolution.
+			buildRunner(userPath, buildMetadataBlock(deps, readRequiresPython(code)), startedPath),
 			{ encoding: "utf8", mode: 0o600 },
 		);
 
@@ -202,6 +232,11 @@ export async function runProbe(options: RunProbeOptions): Promise<ProbeOutcome> 
 
 		const outcome = await new Promise<{ exitCode: number | null; spawnError?: string }>(
 			(resolve) => {
+				if (aborted) {
+					resolve({ exitCode: null });
+					return;
+				}
+
 				const child = spawn(command, [...args], {
 					cwd,
 					env,
@@ -258,6 +293,8 @@ export async function runProbe(options: RunProbeOptions): Promise<ProbeOutcome> 
 			aborted,
 			truncated: stdout.overflowed || stderr.overflowed,
 			droppedEnv: dropped,
+			declaredDeps: deps.length,
+			codeStarted: existsSync(startedPath),
 			durationMs: Date.now() - started,
 		};
 	} finally {

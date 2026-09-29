@@ -3,6 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
+import { render } from "../index.ts";
 
 /** Load the extension and capture the tool it registers. */
 async function loadTool(env: Record<string, string> = {}) {
@@ -249,5 +250,71 @@ describe("configuration", () => {
 			await rm(dir, { recursive: true, force: true });
 			delete process.env.PI_PROBE_CONFIG;
 		}
+	});
+});
+
+describe("explaining a timeout", () => {
+	it("blames a long computation when there is output to show", async () => {
+		const { tool } = await loadTool();
+		const result = await tool.execute(
+			"t10",
+			{ code: 'import time\nprint("started", flush=True)\nwhile True:\n    time.sleep(1)\n', timeout: 2 },
+			new AbortController().signal,
+			() => {},
+			ctxFor(),
+		);
+		assert.match(result.content[0].text, /Timed out after 2s/);
+		assert.match(result.content[0].text, /Raise the timeout/);
+		assert.doesNotMatch(result.content[0].text, /installing/);
+	});
+
+});
+
+/**
+ * The install-vs-compute branch is tested directly rather than through a real
+ * install: a cold install takes seconds and a warm one takes milliseconds, so
+ * an integration test here would be timing-dependent and would rot.
+ */
+describe("explaining a timeout, directly", () => {
+	const base = {
+		stdout: "",
+		stderr: "",
+		exitCode: null,
+		timedOut: true,
+		aborted: false,
+		truncated: false,
+		droppedEnv: [],
+		durationMs: 2000,
+		declaredDeps: 0,
+		codeStarted: true,
+		spawnError: undefined,
+	};
+
+	it("blames the installer when the code never started and packages were declared", () => {
+		const text = render({ ...base, codeStarted: false, declaredDeps: 3 });
+		assert.match(text, /before the code ran/);
+		assert.match(text, /3 package\(s\) were declared/);
+		assert.match(text, /installing them/);
+		assert.doesNotMatch(text, /Raise the timeout/);
+	});
+
+	it("blames the computation when the code did start", () => {
+		const text = render({ ...base, declaredDeps: 3 });
+		assert.match(text, /Raise the timeout/);
+		assert.doesNotMatch(text, /installing them/);
+	});
+
+	it("blames the computation when the code never started but nothing was declared", () => {
+		// No packages means there is nothing to install, so the install branch
+		// would be a lie.
+		const text = render({ ...base, codeStarted: false });
+		assert.match(text, /Raise the timeout/);
+		assert.doesNotMatch(text, /installing them/);
+	});
+
+	it("does not claim the environment is secret", () => {
+		const text = render({ ...base, droppedEnv: ["GITHUB_TOKEN"], timedOut: false, exitCode: 0 });
+		assert.match(text, /environment does not carry those values/);
+		assert.doesNotMatch(text, /cannot read your credentials/);
 	});
 });

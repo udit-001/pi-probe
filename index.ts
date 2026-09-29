@@ -18,13 +18,13 @@ import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { authorizeDeps, readDeclaredDeps } from "./src/deps.ts";
-import { DEFAULT_TIMEOUT_SEC, MAX_TIMEOUT_SEC, runProbe } from "./src/probe.ts";
+import { DEFAULT_TIMEOUT_SEC, MAX_TIMEOUT_SEC, runProbe, type ProbeOutcome } from "./src/probe.ts";
 
 const ProbeParams = Type.Object({
 	code: Type.String({
 		description:
-			"Python source to run. Must be self-contained: it carries its own imports and setup, " +
-			"because every call starts a new process with nothing remembered.",
+			"Python source. Self-contained: it carries its own imports and setup, and each call " +
+			"starts from a clean process.",
 	}),
 	timeout: Type.Optional(
 		Type.Number({
@@ -40,7 +40,13 @@ interface ProbeConfig {
 	extraEnv?: string[];
 }
 
-const EMPTY_CONFIG: ProbeConfig = { allowedPackages: [], extraEnv: [] };
+/** What `loadConfig` always hands back: every field present, no undefined. */
+interface ResolvedConfig {
+	allowedPackages: string[];
+	extraEnv: string[];
+}
+
+const EMPTY_CONFIG: ResolvedConfig = { allowedPackages: [], extraEnv: [] };
 
 /**
  * A render result is just something that turns into lines. Implementing that
@@ -55,33 +61,29 @@ function lines(...items: string[]): { render(): string[]; invalidate(): void } {
 	};
 }
 
-async function loadConfig(): Promise<ProbeConfig> {
-	const override = process.env.PI_PROBE_CONFIG;
-	const candidates = override
-		? [override]
-		: [join(dirname(fileURLToPath(import.meta.url)), "probe.config.json")];
-	for (const path of candidates) {
-		try {
-			const parsed: unknown = JSON.parse(await readFile(path, "utf8"));
-			if (parsed && typeof parsed === "object") {
-				const config = parsed as ProbeConfig;
-				return {
-					allowedPackages: config.allowedPackages ?? [],
-					extraEnv: config.extraEnv ?? [],
-				};
-			}
-		} catch {
-			// No config is the normal case: the tool works with nothing configured.
-		}
+async function loadConfig(): Promise<ResolvedConfig> {
+	// A missing or unreadable config is the normal case: the tool works with
+	// nothing configured, and anything unreadable falls back to "nothing
+	// allowed" rather than to something half-parsed.
+	const path = process.env.PI_PROBE_CONFIG ?? join(dirname(fileURLToPath(import.meta.url)), "probe.config.json");
+	try {
+		const parsed: unknown = JSON.parse(await readFile(path, "utf8"));
+		if (!parsed || typeof parsed !== "object") return EMPTY_CONFIG;
+		const config = parsed as ProbeConfig;
+		return {
+			allowedPackages: config.allowedPackages ?? [],
+			extraEnv: config.extraEnv ?? [],
+		};
+	} catch {
+		return EMPTY_CONFIG;
 	}
-	return EMPTY_CONFIG;
 }
 
 const DESCRIPTION = `Run throwaway Python and get the answer, in one call.
 
 Use this to check a value, see how a library behaves, inspect data, or try an idea
-before writing it into a file. Each call is a new process, so the code must be
-standalone -- it carries its own imports and setup.
+before writing it into a file. The code is self-contained and each call starts
+from a clean process.
 
 The value of the last expression is printed for you, so end with the thing you
 want to see rather than wrapping it in print().
@@ -103,7 +105,7 @@ export default function (pi: ExtensionAPI) {
 	// Approved-for-this-session package names. Cleared per session so a yes in
 	// one conversation never authorises the next one.
 	const approved = new Set<string>();
-	let config: ProbeConfig = EMPTY_CONFIG;
+	let config: ResolvedConfig = EMPTY_CONFIG;
 	let configLoaded = false;
 
 	pi.on("session_start", async () => {
@@ -121,7 +123,7 @@ export default function (pi: ExtensionAPI) {
 		promptSnippet: "probe: run throwaway Python for an answer, in a fresh process",
 		promptGuidelines: [
 			"Prefer probe over write-then-run when the code is throwaway: it is one call instead of three.",
-			"probe cells are standalone, so a probe never continues from an earlier one.",
+			"Each probe is independent; restate whatever a probe needs rather than expecting a predecessor.",
 		],
 		parameters: ProbeParams,
 		// Cells are independent, so parallel calls are safe and a batch of
@@ -137,9 +139,7 @@ export default function (pi: ExtensionAPI) {
 				configLoaded = true;
 			}
 
-			const decision = authorizeDeps(readDeclaredDeps(code), {
-				allowedPackages: config.allowedPackages ?? [],
-			}, approved);
+			const decision = authorizeDeps(readDeclaredDeps(code), { allowedPackages: config.allowedPackages }, approved);
 
 			if (decision.refused.length > 0) {
 				throw new Error(
@@ -175,63 +175,41 @@ export default function (pi: ExtensionAPI) {
 
 			if (outcome.spawnError) throw new Error(outcome.spawnError);
 
-			const details = {
-				code,
-				exitCode: outcome.exitCode,
-				timedOut: outcome.timedOut,
-				aborted: outcome.aborted,
-				truncated: outcome.truncated,
-				durationMs: outcome.durationMs,
-				droppedEnv: outcome.droppedEnv,
-				stdout: outcome.stdout,
-				stderr: outcome.stderr,
-			};
+			// `details` carries the whole outcome, so the renderer and the
+			// model-facing text are both built from one object.
+			const details = { ...outcome, code };
 
 			return { content: [{ type: "text", text: render(outcome) }], details };
 		},
 
+		// Reuses the same text the model reads, rather than re-deriving the
+		// status line and the trailing-newline trim in a second place.
 		renderResult(result, { expanded }, theme) {
-			const d = result.details as
-				| { exitCode: number | null; timedOut: boolean; durationMs: number; stdout: string; stderr: string }
-				| undefined;
-			if (!d) return lines(theme.fg("dim", "probe"));
-
-			const status = d.timedOut
-				? theme.fg("warning", "timed out")
-				: d.exitCode === 0
-					? theme.fg("success", `ok ${d.durationMs}ms`)
-					: theme.fg("error", `exit ${d.exitCode}`);
-
-			if (!expanded) {
-				const first = d.stdout.split("\n").find((line) => line.trim());
-				const preview = first ? theme.fg("dim", first.slice(0, 70)) : "";
-				return lines(preview ? `${status} ${preview}` : status);
-			}
-
-			const out: string[] = [status];
-			if (d.stdout) out.push(theme.fg("dim", d.stdout.replace(/\n$/, "")));
-			if (d.stderr.trim()) out.push(theme.fg("error", d.stderr.replace(/\n$/, "")));
-			return lines(...out);
+			const text = render(result.details as ProbeOutcome);
+			if (expanded) return lines(text);
+			const first = text.split("\n").find((line) => line.trim()) ?? "probe";
+			return lines(theme.fg("dim", first.slice(0, 80)));
 		},
 	});
 }
 
-/** Shape one probe's outcome as the text the model reads. */
-function render(outcome: {
-	stdout: string;
-	stderr: string;
-	exitCode: number | null;
-	timedOut: boolean;
-	aborted: boolean;
-	durationMs: number;
-	droppedEnv: string[];
-}): string {
+/** Shape one probe's outcome as the text the model reads. Exported for tests. */
+export function render(outcome: ProbeOutcome): string {
 	const parts: string[] = [];
 
 	if (outcome.timedOut) {
+		// Timed out installing and timed out computing need opposite advice.
+		// The runner touches a marker file the instant user code starts, so this
+		// is a fact rather than a guess about what uv printed.
+		const spentInstalling = !outcome.codeStarted && outcome.declaredDeps > 0;
 		parts.push(
-			`Timed out after ${Math.round(outcome.durationMs / 1000)}s and was killed. ` +
-				"Raise the timeout if the work is legitimate, or narrow the code.",
+			spentInstalling
+				? `Timed out after ${Math.round(outcome.durationMs / 1000)}s before the code ran. ` +
+						`${outcome.declaredDeps} package(s) were declared, so the budget went to ` +
+						"installing them. Retry with a higher timeout; the install is cached, so the " +
+						"retry gets the whole budget for the code."
+				: `Timed out after ${Math.round(outcome.durationMs / 1000)}s and was killed. ` +
+						"Raise the timeout if the work is legitimate, or narrow the code.",
 		);
 	} else if (outcome.aborted) {
 		parts.push("Cancelled before it finished.");
@@ -246,9 +224,12 @@ function render(outcome: {
 	// showing when something actually went wrong or needs installing.
 	if (outcome.stderr.trim()) parts.push(`stderr:\n${outcome.stderr.replace(/\n$/, "")}`);
 	if (outcome.droppedEnv.length > 0) {
+		// Scoped claim on purpose. The environment is built from a fixed list,
+		// so a probe cannot read these -- but it runs as you and can still open
+		// a file under your home directory, which is a different thing entirely.
 		parts.push(
-			`Note: probe does not pass through ${outcome.droppedEnv.join(", ")}. ` +
-				"A probe cannot read your credentials.",
+			`Note: probe did not pass through ${outcome.droppedEnv.join(", ")}, so its ` +
+				"environment does not carry those values.",
 		);
 	}
 

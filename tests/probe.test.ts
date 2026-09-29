@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it } from "node:test";
 import { runProbe } from "../src/probe.ts";
 
@@ -24,13 +27,13 @@ describe("runProbe", () => {
 		assert.equal(r.stdout.trim(), "hello");
 	});
 
-	it("keeps stdout in written order by running unbuffered", async () => {
+	it("keeps each stream in written order", async () => {
+		// Single-stream order is what this actually asserts. Cross-stream order
+		// is not observable from two separate pipes, and the earlier version of
+		// this test claimed to check it while only stripping whitespace.
 		const r = await run('import sys\nfor i in range(3):\n    print(i); sys.stderr.write(f"e{i}\\n")\n');
-		assert.equal(
-			r.stdout.replace(/\s/g, ""),
-			"012",
-			"stdout arrived out of order relative to itself",
-		);
+		assert.equal(r.stdout.replace(/\s/g, ""), "012");
+		assert.equal(r.stderr.replace(/\s/g, ""), "e0e1e2");
 	});
 
 	it("reports a traceback with the model's own line numbers", async () => {
@@ -131,5 +134,82 @@ describe("runProbe", () => {
 		const before = await scratch();
 		for (let i = 0; i < 3; i++) await run(`print(${i})\n`);
 		assert.equal(await scratch(), before, "a scratch directory survived the run");
+	});
+});
+
+/** Findings from review: places where the test passed without proving the claim. */
+describe("review findings", () => {
+	it("actually kills the grandchildren, not just the direct child", async (t) => {
+		const scratch = await mkdtemp(join(tmpdir(), "probe-pids-"));
+		t.after(() => rm(scratch, { recursive: true, force: true }));
+		const pidFile = join(scratch, "pid");
+		// The grandchild writes its own pid, then idles. If the process-group
+		// kill did not reach it, it is still alive after runProbe returns.
+		const grandchild = `import os,time;open(${JSON.stringify(pidFile)},'w').write(str(os.getpid()));time.sleep(300)`;
+		const code = [
+			"import subprocess, sys",
+			`subprocess.Popen([sys.executable, "-c", ${JSON.stringify(grandchild)}])`,
+			"while True:",
+			"    pass",
+			"",
+		].join("\n");
+		const r = await runProbe({ cwd: here, timeoutSec: 2, code });
+		assert.equal(r.timedOut, true, r.stderr.slice(-300));
+
+		const pid = Number((await readFile(pidFile, "utf8")).trim());
+		assert.ok(Number.isInteger(pid) && pid > 0, "the grandchild never reported a pid");
+		// Signal 0 tests for existence without delivering anything.
+		assert.throws(
+			() => process.kill(pid, 0),
+			/ESRCH/,
+			`grandchild ${pid} survived the timeout`,
+		);
+	});
+
+	it("reports a pre-aborted signal instead of running to the timeout", async () => {
+		const controller = new AbortController();
+		controller.abort();
+		const started = Date.now();
+		const r = await runProbe({ code: "while True:\n    pass\n", cwd: here, signal: controller.signal });
+		assert.equal(r.aborted, true);
+		assert.ok(Date.now() - started < 5000, "a settled abort should not wait for the timeout");
+	});
+
+	it("keeps the final value when truncation cuts through a multi-byte character", async () => {
+		const r = await run("print('\\u00e9' * 100)\n'final answer'\n", { timeoutSec: 30 });
+		assert.equal(r.exitCode, 0);
+		assert.match(r.stdout, /'final answer'/);
+		assert.doesNotMatch(r.stdout, /bytes omitted/);
+	});
+
+	it("ignores a tool.uv index override when resolving", async () => {
+		// If the override reached uv, `rich` would fail to resolve from the
+		// dead host instead of installing from PyPI.
+		const r = await runProbe({
+			cwd: here,
+			timeoutSec: 120,
+			code: `# /// script
+# dependencies = ["rich"]
+# [tool.uv]
+# index = "https://evil.invalid/simple"
+# ///
+import rich
+"installed anyway"
+`,
+		});
+		assert.equal(r.exitCode, 0, r.stderr.slice(-500));
+		assert.doesNotMatch(r.stderr, /evil\.invalid/);
+		assert.match(r.stdout, /installed anyway/);
+	});
+
+	it("reports the dependency count so a timeout can be explained", async () => {
+		const r = await runProbe({ code: "print('x')\n", cwd: here });
+		assert.equal(r.declaredDeps, 0);
+		const withDeps = await runProbe({
+			code: '# /// script\n# dependencies = ["rich"]\n# ///\nimport rich\n',
+			cwd: here,
+			timeoutSec: 120,
+		});
+		assert.equal(withDeps.declaredDeps, 1);
 	});
 });

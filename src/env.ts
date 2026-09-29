@@ -6,6 +6,13 @@
  *   Model-authored code cannot read the user's secrets out of its own
  *   environment.
  *
+ * Read that narrowly: it is about the *environment*, and nothing else. A probe
+ * runs as the user, in the user's working directory, and can open any file the
+ * user can open -- `~/.aws/credentials`, `~/.netrc`, `~/.ssh/id_rsa`. `HOME`
+ * has to be in the list for uv to work at all. Closing that would mean a real
+ * sandbox, which is a different tool with a different cost, and pretending
+ * otherwise here would make the guarantee untestable and untrue.
+ *
  * That is done structurally, not by filtering: the child env is built from a
  * fixed set of names copied out of the parent. Everything else is simply not
  * there, so there is no allowlist to bypass and no rule to get subtly wrong.

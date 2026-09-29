@@ -17,12 +17,20 @@
  * instead.
  */
 
-export const USER_MARKER = "# === pi-probe:user ===";
-
-/** Build the runner source that executes `userPath`. */
-export function buildRunner(userPath: string, metadataBlock: string): string {
+/**
+ * Build the runner source that executes `userPath`.
+ *
+ * `startedPath` is touched as the very first thing, before any user code. Its
+ * presence is the only trustworthy answer to "did the interpreter ever get
+ * your code running?", which is what separates a timeout spent installing
+ * packages from a timeout spent computing. Guessing that from stderr does not
+ * work: uv writes "Installed 4 packages" and then the cell runs forever, and
+ * the two cases need opposite advice.
+ */
+export function buildRunner(userPath: string, metadataBlock: string, startedPath?: string): string {
 	const preamble = `import ast as _pa, os as _po, sys as _ps
 _P = ${JSON.stringify(userPath)}
+${startedPath ? `open(${JSON.stringify(startedPath)}, "w").close()` : "pass"}
 _po.sys.path.insert(0, _po.getcwd())
 _src = open(_P, encoding="utf-8").read()
 _tree = _pa.parse(_src, _P)

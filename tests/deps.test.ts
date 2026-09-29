@@ -2,10 +2,14 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
 	authorizeDeps,
+	buildMetadataBlock,
 	extractScriptMetadata,
 	normalizePackageName,
 	readDeclaredDeps,
+	readRequiresPython,
 } from "../src/deps.ts";
+
+const NO_PACKAGES = { allowedPackages: [] as string[] };
 
 const withDeps = (...list: string[]) =>
 	`# /// script\n# dependencies = [${list.map((d) => `"${d}"`).join(", ")}]\n# ///\nprint("hi")\n`;
@@ -133,5 +137,97 @@ describe("authorizeDeps", () => {
 		const decision = authorizeDeps(readDeclaredDeps(withDeps("rich", "rich>=13")), none);
 		assert.deepEqual(decision.pendingKeys, ["rich"]);
 		assert.equal(decision.needsApproval.length, 2);
+	});
+});
+
+/**
+ * These came out of review. Each one reproduced a way the human could approve
+ * a name that was not the name that got installed.
+ */
+describe("multi-line dependency lists", () => {
+	const multiline = `# /// script
+# dependencies = [
+#   "rich",  # harmless looking
+#   "evil",
+# ]
+# ///
+import rich
+`;
+
+	it("reads the real names out of a multi-line list", () => {
+		assert.deepEqual(
+			readDeclaredDeps(multiline).map((d) => d.name),
+			["rich", "evil"],
+		);
+	});
+
+	it("does not show the human a name mangled by comment syntax", () => {
+		const decision = authorizeDeps(readDeclaredDeps(multiline), NO_PACKAGES);
+		assert.deepEqual(decision.pendingKeys, ["rich", "evil"]);
+		assert.doesNotMatch(decision.needsApproval.join(" "), /#/);
+	});
+
+	it("keeps version specifiers from a multi-line list", () => {
+		const d = readDeclaredDeps(`# /// script\n# dependencies = [\n#   "pandas>=2.0",\n# ]\n# ///\n`);
+		assert.deepEqual(d.map((x) => x.raw), ["pandas>=2.0"]);
+		assert.deepEqual(d.map((x) => x.name), ["pandas"]);
+	});
+
+	it("reads an empty multi-line list as no dependencies", () => {
+		assert.deepEqual(readDeclaredDeps(`# /// script\n# dependencies = [\n# ]\n# ///\n`), []);
+	});
+
+	it("keeps a # inside a quoted requirement", () => {
+		const d = readDeclaredDeps(`# /// script\n# dependencies = ["weird#name"]\n# ///\n`);
+		assert.deepEqual(d.map((x) => x.raw), ["weird#name"]);
+	});
+});
+
+describe("path and archive references", () => {
+	for (const spec of ["./pkg", "../shared/lib", "/opt/pkg", "~/pkg", "C:\\pkgs\\thing", "pkg-1.0.whl", "pkg-1.0.tar.gz"]) {
+		it(`treats ${spec} as a direct reference`, () => {
+			const dep = readDeclaredDeps(`# /// script\n# dependencies = ["${spec}"]\n# ///\n`)[0];
+			assert.equal(dep?.direct, true, `${spec} should not be installable by name`);
+			assert.equal(dep?.name, "");
+		});
+	}
+
+	it("does not mistake an ordinary package for a path", () => {
+		for (const name of ["rich", "pandas>=2", "uvicorn[standard]==0.30", "python-dateutil"]) {
+			const dep = readDeclaredDeps(`# /// script\n# dependencies = ["${name}"]\n# ///\n`)[0];
+			assert.equal(dep?.direct, false, `${name} is a normal package`);
+		}
+	});
+});
+
+describe("the block handed to uv", () => {
+	it("cannot carry a tool.uv index override through to resolution", () => {
+		const code = `# /// script
+# dependencies = ["evil"]
+# [tool.uv]
+# index = "https://evil.example/simple"
+# ///
+import evil
+`;
+		const block = buildMetadataBlock(readDeclaredDeps(code), readRequiresPython(code));
+		assert.doesNotMatch(block, /evil\.example/);
+		assert.doesNotMatch(block, /tool\.uv/);
+		assert.doesNotMatch(block, /index/);
+		assert.match(block, /dependencies = \["evil"\]/);
+	});
+
+	it("preserves a legitimate requires-python", () => {
+		const code = `# /// script\n# requires-python = ">=3.11"\n# dependencies = ["rich"]\n# ///\n`;
+		const block = buildMetadataBlock(readDeclaredDeps(code), readRequiresPython(code));
+		assert.match(block, /requires-python = ">=3\.11"/);
+	});
+
+	it("produces a block uv accepts with no dependencies at all", () => {
+		assert.equal(buildMetadataBlock([], undefined), "# /// script\n# dependencies = []\n# ///");
+	});
+
+	it("quotes an entry containing a quote so the block stays parseable", () => {
+		const block = buildMetadataBlock([{ raw: 'a"b', name: "a-b", direct: false }], undefined);
+		assert.match(block, /dependencies = \["a\\"b"\]/);
 	});
 });
