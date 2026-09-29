@@ -19,12 +19,19 @@
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { keyHint, keyText, type ExtensionAPI, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
+import {
+	keyHint,
+	keyText,
+	truncateToVisualLines,
+	type ExtensionAPI,
+	type ExtensionContext,
+	type Theme,
+} from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { authorizeDeps, readDeclaredDeps } from "./src/deps.ts";
 import { DEFAULT_TIMEOUT_SEC, MAX_TIMEOUT_SEC, runProbe, type ProbeOutcome } from "./src/probe.ts";
 import { resolveWorkspace } from "./src/workspace.ts";
-import { callView, collapsedView, expandedView, textView, type ViewTheme } from "./src/view.ts";
+import { callView, collapsedView, expandedView, textView, type ViewPort } from "./src/view.ts";
 
 const ProbeParams = Type.Object({
 	code: Type.String({
@@ -54,28 +61,53 @@ interface ResolvedConfig {
 
 const EMPTY_CONFIG: ResolvedConfig = { allowedPackages: [], extraEnv: [] };
 
+/** The narrowest width a view is laid out for. Below this the views stop being readable. */
+const MIN_VIEW_WIDTH = 24;
+
 /**
- * A render result is just something that turns into lines. Implementing that
- * here rather than importing pi's TUI package keeps the extension working
- * across pi versions -- that package is nested inside pi's own install, not
- * published for extensions to depend on.
+ * A render result is just something that turns into lines at a width.
+ *
+ * pi calls `render(width)` on every frame for every tool result in the
+ * transcript, and the width is the only thing that decides how a view lays
+ * out, so a view cannot be built once up front: it is built per width and
+ * cached against the last one, exactly as pi's own shell renderer does. The
+ * `invalidate` pi holds on the returned value drops the cache, and pi rebuilds
+ * that value whenever the result, the expansion, or the theme changes.
+ *
+ * Implementing the interface here rather than importing pi's TUI package keeps
+ * the extension working across pi versions -- that package is nested inside
+ * pi's own install, not published for extensions to depend on.
  */
-function lines(...items: string[]): { render(): string[]; invalidate(): void } {
+function viewLines(build: (width: number) => string[]): { render(width: number): string[]; invalidate(): void } {
+	let cachedWidth: number | undefined;
+	let cachedLines: string[] | undefined;
 	return {
-		render: () => items.flatMap((item) => item.split("\n")),
-		invalidate: () => {},
+		render(width) {
+			// A host that reports a nonsense width gets the narrowest layout
+			// rather than an arithmetic error three layers down.
+			const at = Number.isFinite(width) ? Math.max(MIN_VIEW_WIDTH, Math.floor(width)) : MIN_VIEW_WIDTH;
+			if (cachedLines === undefined || cachedWidth !== at) {
+				cachedWidth = at;
+				cachedLines = build(at);
+			}
+			return cachedLines;
+		},
+		invalidate() {
+			cachedWidth = undefined;
+			cachedLines = undefined;
+		},
 	};
 }
 
 /**
- * pi's theme, adapted to the view port.
+ * pi's theme and layout, adapted to the view port.
  *
  * This is the one impure adapter in the repo, and it is here on purpose.
  * `keyHint` reads process-global theme and keybinding state and throws outside
  * a live TUI, so it is resolved at the edge, once, where a terminal exists.
  * Everything behind the port is pure and can be tested in a bare process.
  */
-function tuiTheme(theme: Theme): ViewTheme {
+function tuiPort(theme: Theme): ViewPort {
 	// `keyHint` is `key + " to expand"`, and it renders an empty key as a
 	// leading space rather than nothing. A registry that has not loaded yet
 	// would leave the line saying "5 earlier lines,  to expand" -- so the
@@ -85,6 +117,11 @@ function tuiTheme(theme: Theme): ViewTheme {
 		fg: (color, text) => theme.fg(color, text),
 		bold: (text) => theme.bold(text),
 		expandHint: key ? keyHint("app.tools.expand", "to expand") : "expand to see the rest",
+		// Re-exported by pi itself, so the wrapping is the same maths every
+		// other tool in the transcript is measured with. The alternative --
+		// importing it into the view module -- would tie the views to pi's
+		// TUI package and make their layout untestable without it.
+		wrap: truncateToVisualLines,
 	};
 }
 
@@ -242,17 +279,20 @@ export default function (pi: ExtensionAPI) {
 
 		// A probe can run for a minute with nothing on screen. Quoting the
 		// expression that will produce the value is what makes the wait legible.
+		// One line, clipped rather than wrapped: a call line that reflows
+		// mid-run is a worse receipt than one that ends in an ellipsis.
 		renderCall(args, theme) {
-			return lines(callView(args as { code: string; timeout?: number }, tuiTheme(theme)));
+			const port = tuiPort(theme);
+			return viewLines(width => [callView(args as { code: string; timeout?: number }, port, width)]);
 		},
 
 		// Both views and the model's text come out of the same decomposition, so
 		// the state label, the trailing-newline trim, and the stderr label are
 		// each decided once rather than per view.
 		renderResult(result, { expanded }, theme) {
-			const view = tuiTheme(theme);
+			const port = tuiPort(theme);
 			const outcome = result.details as ProbeOutcome;
-			return lines(...(expanded ? expandedView(outcome, view) : collapsedView(outcome, view)));
+			return viewLines(width => (expanded ? expandedView(outcome, port, width) : collapsedView(outcome, port, width)));
 		},
 	});
 }

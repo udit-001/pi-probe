@@ -16,20 +16,34 @@
  * newline trim, the stderr-over-stdout preference, and the timeout advice.
  *
  * This module is pure. It reads no clock, no environment, and no global
- * state, and the one thing it cannot compute for itself -- the key that
- * expands a tool result -- arrives through {@link ViewTheme.expandHint}
- * instead of an import. pi's own `keyHint` reads process-global theme and
- * keybinding state and throws outside a live TUI; keeping it at the call site
- * is what lets these renderings be tested in a bare process.
+ * state, and the two things it cannot compute for itself -- the key that
+ * expands a tool result, and how a styled string becomes visual lines at a
+ * given width -- arrive through the {@link ViewPort} instead of an import.
+ * pi's own `keyHint` reads process-global theme and keybinding state and
+ * throws outside a live TUI, and its wrapping lives in pi's TUI package;
+ * keeping both at the call site is what lets these renderings be tested in a
+ * bare process, and what keeps the wrapping decisions testable without a
+ * terminal.
  */
 
 import { MAX_OUTPUT_BYTES, MAX_TIMEOUT_SEC, type ProbeOutcome } from "./probe.ts";
 
-/** How many lines of output the shut view shows. The tail, because that is the answer. */
-const COLLAPSED_TAIL_LINES = 3;
+/**
+ * How many *visual* lines of output the shut view shows. The tail, because
+ * that is the answer. Visual rather than logical, because a cell that printed
+ * one long line has still printed more than fits on screen.
+ */
+const COLLAPSED_VISUAL_LINES = 3;
 
 /** How much of the code the call line quotes. A call line is a receipt, not a listing. */
 const CALL_SUMMARY_CHARS = 60;
+
+/** The gutter every line of a shut view carries, and the width it costs. */
+const INDENT = "  ";
+const CALL_PREFIX = `probe${INDENT}`;
+
+/** A line the reader may need in full, so never cut one to a line count. */
+const UNLIMITED = Number.MAX_SAFE_INTEGER;
 
 /** How long the recovery hint sleeps before giving up on a round number. */
 const SUGGESTED_TIMEOUT_MULTIPLE = 3;
@@ -38,15 +52,46 @@ const SUGGESTED_TIMEOUT_ROUNDING_SEC = 30;
 /** The theme tokens these views use. A subset of pi's, named so a typo is a type error. */
 export type ViewColor = "accent" | "dim" | "error" | "muted" | "success" | "toolOutput" | "toolTitle" | "warning";
 
+/** Text laid out at a width: the lines that fit, and how many did not. */
+export interface VisualWrap {
+	/**
+	 * The visual lines to show, oldest first, each padded out to `width`. The
+	 * views strip that padding, so an adapter that does not pad is equally
+	 * usable -- what must hold is only that no line is wider than `width`.
+	 */
+	visualLines: string[];
+	/** Visual lines dropped off the front, which is what the hint counts. */
+	skippedCount: number;
+}
+
 /**
- * The styling port. Two adapters satisfy it: pi's live theme, and the identity
- * theme the tests use to assert on plain text.
+ * The host's measurement, handed in rather than imported.
+ *
+ * The interface it has to satisfy: `text` is *styled*, because a colour escape
+ * is not a column and only the host's terminal maths knows the difference;
+ * `width` is positive; and the tail is what survives, because every caller here
+ * wants the end of the answer.
+ *
+ * It is a seam and not an indirection because the two adapters genuinely
+ * differ. The host word-wraps and pads, and a test that asserted on "three
+ * visual lines" would then be asserting on pi's wrapping policy rather than on
+ * this view's composition. The test adapter wraps plainly, so the tests pin
+ * what these views decide and nothing else.
  */
-export interface ViewTheme {
+export type WrapVisual = (text: string, maxVisualLines: number, width: number) => VisualWrap;
+
+/**
+ * The port: what the host knows about colour, keys, and width. Two adapters
+ * satisfy it -- pi's live theme, and the identity port the tests use to assert
+ * on plain text -- and the wrapping arrives through the same seam so a test can
+ * hand in a width and get a deterministic layout.
+ */
+export interface ViewPort {
 	fg(color: ViewColor, text: string): string;
 	bold(text: string): string;
 	/** How to tell the reader the result can be opened, e.g. "Ctrl+O to expand". */
 	expandHint: string;
+	wrap: WrapVisual;
 }
 
 /** How a run ended. One name per state, so a scan can match on the word. */
@@ -140,13 +185,25 @@ function recovery(outcome: ProbeOutcome, installing: boolean): string {
 
 /**
  * Collapse a run to whitespace and clip it, so a long line cannot take over
- * the view. A hard character cap rather than a column one: these renderings
- * hand pi a fixed array of strings and never learn the terminal width, which
- * is the price of not importing pi's TUI package.
+ * the call line. Characters, not columns: this is an approximation for a
+ * single receipt line, where a miscount costs an ellipsis rather than a
+ * wrapped block.
  */
 function snippet(text: string, max: number): string {
 	const compact = text.replace(/\s+/g, " ").trim();
 	return compact.length > max ? `${compact.slice(0, max - 1)}…` : compact;
+}
+
+/**
+ * Lay styled text out at a width and hand back unpadded lines.
+ *
+ * The padding is stripped because these views are one block inside a host that
+ * pads to width itself; keeping it would only make the lines harder to assert
+ * on and print. A `width` the caller should never pass is floored here, so the
+ * arithmetic downstream stays whole.
+ */
+function layout(text: string, maxVisualLines: number, width: number, port: ViewPort): string[] {
+	return port.wrap(text, maxVisualLines, Math.max(1, width)).visualLines.map(line => line.trimEnd());
 }
 
 /** True when the run spent its budget on uv rather than on the cell. */
@@ -233,9 +290,21 @@ function summarize(outcome: ProbeOutcome): RunSummary {
 	};
 }
 
-function renderAdvisories(advisories: Advisory[], theme: ViewTheme): string[] {
-	return advisories.map(advisory =>
-		theme.fg("warning", advisory.kind === "action" ? `  ${advisory.text}` : `  [${advisory.text}]`),
+/**
+ * The advice lines, wrapped rather than clipped, and never cut: a reader who
+ * most needs the recovery is on the narrowest terminal.
+ *
+ * The gutter is added after the wrap, not before, so a continuation line
+ * carries the same indent as the line it continues.
+ */
+function renderAdvisories(advisories: Advisory[], port: ViewPort, width: number, indent: string): string[] {
+	return advisories.flatMap(advisory =>
+		layout(
+			port.fg("warning", advisory.kind === "action" ? advisory.text : `[${advisory.text}]`),
+			UNLIMITED,
+			width - indent.length,
+			port,
+		).map(line => indent + line),
 	);
 }
 
@@ -247,16 +316,21 @@ function renderAdvisories(advisories: Advisory[], theme: ViewTheme): string[] {
  * end with the thing you want to see. Leading with the imports would quote
  * the setup; leading with the dependency header would quote nothing at all.
  */
-export function callView(args: { code: string; timeout?: number }, theme: ViewTheme): string {
+export function callView(args: { code: string; timeout?: number }, port: ViewPort, width: number): string {
 	const summaryLine = args.code
 		.split("\n")
 		.map(line => line.trim())
 		.filter(line => line.length > 0 && !line.startsWith("#"))
 		.pop();
 
-	let text = theme.fg("toolTitle", theme.bold("probe"));
-	text += theme.fg("toolOutput", `  ${summaryLine ? snippet(summaryLine, CALL_SUMMARY_CHARS) : "…"}`);
-	if (args.timeout !== undefined) text += theme.fg("muted", ` (timeout ${args.timeout}s)`);
+	const suffix = args.timeout === undefined ? "" : ` (timeout ${args.timeout}s)`;
+	// Whatever the terminal leaves once the fixed parts of the line are paid
+	// for, capped by taste: a call line is a receipt, not a listing.
+	const budget = Math.max(1, Math.min(CALL_SUMMARY_CHARS, width - CALL_PREFIX.length - suffix.length));
+
+	let text = port.fg("toolTitle", port.bold("probe"));
+	text += port.fg("toolOutput", `${INDENT}${summaryLine ? snippet(summaryLine, budget) : "…"}`);
+	if (suffix) text += port.fg("muted", suffix);
 	return text;
 }
 
@@ -277,53 +351,70 @@ export function textView(outcome: ProbeOutcome): string {
 }
 
 /**
- * The shut view a human scans: the tail of the answer, then any advice, then
- * the receipt.
+ * The shut view a human scans: the tail of the answer as it fits the terminal,
+ * then any advice, then the receipt.
  *
- * The receipt is last, and that is the whole change. Leading with it made
- * every probe look like `ok (595ms)` with the answer hiding behind an expand,
- * and leading with a status sentence made every probe a different length.
+ * The receipt is last, and that is the whole change from leading with it.
+ * Leading with it made every probe look like `ok (595ms)` with the answer
+ * hiding behind an expand, and leading with a status sentence made every probe
+ * a different length.
+ *
+ * The body is wrapped before it is cut, so a cell that printed one very long
+ * line loses its middle rather than its alignment, and the count in the hint
+ * is a count of what the reader cannot see -- visual lines -- rather than of
+ * lines the cell wrote.
  */
-export function collapsedView(outcome: ProbeOutcome, theme: ViewTheme): string[] {
+export function collapsedView(outcome: ProbeOutcome, port: ViewPort, width: number): string[] {
 	const summary = summarize(outcome);
 	const out: string[] = [""];
 
 	const body = summary.stderr || summary.stdout;
 	if (body) {
-		const all = body.split("\n");
-		const tail = all.slice(-COLLAPSED_TAIL_LINES);
 		// stderr outranks stdout: a failing probe usually prints the traceback
 		// and nothing else, and that traceback is the whole diagnosis. It is
 		// also the one place these views step away from pi's house style, which
 		// tints all command output alike -- a traceback is a diagnosis, and a
 		// diagnosis is worth telling apart from an answer.
 		const color: ViewColor = summary.stderr ? "error" : "toolOutput";
-		if (all.length > tail.length) {
-			out.push(theme.fg("muted", `  ... ${all.length - tail.length} earlier lines, ${theme.expandHint}`));
+		const inner = Math.max(1, width - INDENT.length);
+		const wrapped = port.wrap(port.fg(color, body), COLLAPSED_VISUAL_LINES, inner);
+		if (wrapped.skippedCount > 0) {
+			// Wrapped, never cut to a single line: on a narrow terminal the hint
+			// is the only thing saying the answer is still there, and clipping
+			// it to its first visual line once left the reader with "to expand"
+			// and no idea what to do.
+			const hint = `... ${wrapped.skippedCount} earlier lines, ${port.expandHint}`;
+			for (const line of layout(port.fg("muted", hint), UNLIMITED, inner, port)) out.push(INDENT + line);
 		}
-		for (const line of tail) out.push(theme.fg(color, `  ${line}`));
+		for (const line of wrapped.visualLines) out.push(INDENT + line.trimEnd());
 	}
 
-	out.push(...renderAdvisories(summary.advisories, theme));
-	out.push(theme.fg(summary.color, summary.label) + theme.fg("muted", ` · ${summary.duration}`));
+	out.push(...renderAdvisories(summary.advisories, port, width, INDENT));
+	out.push(port.fg(summary.color, summary.label) + port.fg("muted", ` · ${summary.duration}`));
 	return out;
 }
 
 /**
- * The open view: the model's text, pulled apart and tinted, plus the advice a
- * scanning reader skipped over.
+ * The open view: the model's text, pulled apart and tinted, then laid out to
+ * the terminal like everything else, plus the advice a scanning reader skipped
+ * over.
  *
- * The words are the model's words. Only the colour differs, so under an
- * identity theme the two are the same string, and a reader who expands gets
- * nothing new to re-read -- just the shape back.
+ * The words are the model's words. Only the colour and the wrapping differ, so
+ * under an identity theme on a roomy terminal the two are the same string, and
+ * a reader who expands gets nothing new to re-read -- just the shape back.
  */
-export function expandedView(outcome: ProbeOutcome, theme: ViewTheme): string[] {
+export function expandedView(outcome: ProbeOutcome, port: ViewPort, width: number): string[] {
 	const { sentence, color, stdout, stderr, note, advisories } = summarize(outcome);
 	const blocks = [
-		theme.fg(color, sentence),
-		theme.fg("toolOutput", stdout),
-		stderr && `${theme.fg("muted", "stderr:")}\n${theme.fg("error", stderr)}`,
-		theme.fg("dim", note),
-	];
-	return [...blocks.filter(Boolean).join("\n\n").split("\n"), ...renderAdvisories(advisories, theme)];
+		port.fg(color, sentence),
+		port.fg("toolOutput", stdout),
+		stderr && `${port.fg("muted", "stderr:")}\n${port.fg("error", stderr)}`,
+		port.fg("dim", note),
+	].filter(Boolean);
+
+	const body = blocks.flatMap((block, index) => [
+		...(index === 0 ? [] : [""]),
+		...layout(block, UNLIMITED, width, port),
+	]);
+	return [...body, ...renderAdvisories(advisories, port, width, "")];
 }

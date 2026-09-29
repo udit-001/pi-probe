@@ -2,7 +2,7 @@
 
 A pi tool for asking Python one question. One call runs a standalone cell,
 prints the value of its last expression, and forgets everything you did not
-save to WORKSPACE.
+save.
 
 The alternative is writing a file, running it, reading the output, and deleting
 it. That is three round trips and a cleanup step for a question that takes one.
@@ -24,8 +24,7 @@ appears in the agent's list on the next turn.
 - **One call per question.** The value of the last expression comes back, so
   the cell ends with the thing you wanted to see instead of a `print()`.
 - **A clean process every time.** Nothing carries over except what you save
-  to WORKSPACE — no reset, no stale state, and a result never depends on
-  what ran before it.
+  to WORKSPACE — no reset, no stale state.
 - **Real packages, cheaply.** Declare them in a header and uv resolves and
   caches them. A cold `pandas` costs about four seconds here; the environment
   is reused from then on.
@@ -87,11 +86,11 @@ probe  df.groupby("region")["amount"].sum()  (timeout 120s)
 ```
 
 When it finishes, the last few lines are the result and the timing is a
-footnote. Expand it (ctrl+O) for the whole thing.
+footnote. Expand it (Ctrl+O) for the whole thing.
 
 ```
-  {'EMEA': 412000, 'APAC': 288000, 'AMER': 195000}
   ... 4 earlier lines, Ctrl+O to expand
+  {'EMEA': 412000, 'APAC': 288000, 'AMER': 195000}
   ok · 1.4s
 ```
 
