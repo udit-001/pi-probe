@@ -52,6 +52,11 @@ hand to a model, so changes are judged against them.
 - `src/runner.ts` -- the Python preamble: REPL-style last-expression output,
   traceback lines that point at the user's code, WORKSPACE handed into the
   cell namespace.
+- `src/view.ts` -- every rendering of one outcome: the model's text, the shut
+  and open TUI views, and the call line. The state classification, the duration
+  format, the label vocabulary, and the timeout advice are decided once in
+  `summarize` and read four times; a view that decides any of them itself is a
+  view that will drift from the others.
 - `index.ts` -- the adapter that registers the tool, resolves the session id,
   and owns the agent-facing description.
 
@@ -61,8 +66,14 @@ hand to a model, so changes are judged against them.
   real uv). Single file while iterating: `node --test tests/<file>.test.ts`.
 - Tests assert behavior at seams, never internals: workspace behavior through
   `resolveWorkspace` (`tests/workspace.test.ts`), cell behavior through
-  `runProbe` (`tests/probe.test.ts`). A bug in `ensureOwnedDir` or `pruneStale`
-  is caught by a test that goes through `resolveWorkspace`, not by poking the
-  helpers.
+  `runProbe` (`tests/probe.test.ts`), rendering through the four functions in
+  `src/view.ts` (`tests/view.test.ts`). A bug in `ensureOwnedDir` or
+  `pruneStale` is caught by a test that goes through `resolveWorkspace`, not by
+  poking the helpers.
+- The view port has two adapters -- pi's live theme and the identity theme in
+  `tests/view.test.ts` -- so a test can assert the words through one and the
+  colour choices through the recording one. `keyHint` stays in `index.ts`:
+  it reads process-global theme and keybinding state and throws outside a live
+  TUI, so importing it into `src/view.ts` would cost the module its purity.
 - Keep user-facing copy -- and only that -- in the README; security-model
   truth and dev workflow live in this file.

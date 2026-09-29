@@ -59,6 +59,12 @@ export interface ProbeOutcome {
 	 */
 	codeStarted: boolean;
 	durationMs: number;
+	/**
+	 * The budget this run actually got, after clamping. The timeout advice
+	 * quotes a larger one, and a suggestion nobody could have asked for is
+	 * worse than none.
+	 */
+	timeoutSec: number;
 }
 
 /** Decode bytes, dropping a UTF-8 sequence cut in half by a byte boundary. */
@@ -305,6 +311,7 @@ export async function runProbe(options: RunProbeOptions): Promise<ProbeOutcome> 
 			declaredDeps: deps.length,
 			codeStarted: existsSync(startedPath),
 			durationMs: Date.now() - started,
+			timeoutSec,
 		};
 	} finally {
 		await removeScratch(dir);

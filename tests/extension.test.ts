@@ -3,7 +3,6 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { render } from "../index.ts";
 
 /** Load the extension and capture the tool it registers. */
 async function loadTool(env: Record<string, string> = {}) {
@@ -266,117 +265,5 @@ describe("explaining a timeout", () => {
 		assert.match(result.content[0].text, /Timed out after 2s/);
 		assert.match(result.content[0].text, /Raise the timeout/);
 		assert.doesNotMatch(result.content[0].text, /installing/);
-	});
-
-});
-
-/**
- * The install-vs-compute branch is tested directly rather than through a real
- * install: a cold install takes seconds and a warm one takes milliseconds, so
- * an integration test here would be timing-dependent and would rot.
- */
-describe("explaining a timeout, directly", () => {
-	const base = {
-		stdout: "",
-		stderr: "",
-		exitCode: null,
-		timedOut: true,
-		aborted: false,
-		truncated: false,
-		droppedEnv: [],
-		durationMs: 2000,
-		declaredDeps: 0,
-		codeStarted: true,
-		spawnError: undefined,
-	};
-
-	it("blames the installer when the code never started and packages were declared", () => {
-		const text = render({ ...base, codeStarted: false, declaredDeps: 3 });
-		assert.match(text, /before the code ran/);
-		assert.match(text, /3 package\(s\) were declared/);
-		assert.match(text, /installing them/);
-		assert.doesNotMatch(text, /Raise the timeout/);
-	});
-
-	it("blames the computation when the code did start", () => {
-		const text = render({ ...base, declaredDeps: 3 });
-		assert.match(text, /Raise the timeout/);
-		assert.doesNotMatch(text, /installing them/);
-	});
-
-	it("blames the computation when the code never started but nothing was declared", () => {
-		// No packages means there is nothing to install, so the install branch
-		// would be a lie.
-		const text = render({ ...base, codeStarted: false });
-		assert.match(text, /Raise the timeout/);
-		assert.doesNotMatch(text, /installing them/);
-	});
-
-	it("does not claim the environment is secret", () => {
-		const text = render({ ...base, droppedEnv: ["GITHUB_TOKEN"], timedOut: false, exitCode: 0 });
-		assert.match(text, /environment does not carry those values/);
-		assert.doesNotMatch(text, /cannot read your credentials/);
-	});
-});
-
-/**
- * The collapsed line is what a human supervising a run actually reads. It used
- * to be the first line of `render`, which is always the status line, so every
- * probe looked like `ok (595ms)` with the answer hidden behind an expand.
- */
-describe("the collapsed view a human reads", () => {
-	const theme = { fg: (_color: string, text: string) => text };
-
-	const collapsedLines = async (details: Record<string, unknown>) => {
-		const { tool } = await loadTool();
-		return tool.renderResult({ details }, { expanded: false }, theme).render() as string[];
-	};
-
-	const base = {
-		stdout: "",
-		stderr: "",
-		exitCode: 0,
-		timedOut: false,
-		aborted: false,
-		droppedEnv: ["GITHUB_TOKEN"],
-		durationMs: 595,
-		declaredDeps: 0,
-		codeStarted: true,
-		spawnError: undefined,
-	};
-
-	it("shows the value, not just the receipt", async () => {
-		const lines = await collapsedLines({ ...base, stdout: "{'providers': 225}\n" });
-		assert.deepEqual(lines, ["ok (595ms)", "  {'providers': 225}"]);
-	});
-
-	it("keeps the last lines, where a probe's answer lives", async () => {
-		const stdout = Array.from({ length: 8 }, (_, i) => `line${i + 1}`).join("\n") + "\n";
-		const lines = await collapsedLines({ ...base, stdout });
-		assert.deepEqual(lines, ["ok (595ms)", "... 5 earlier lines, expand for all", "  line6", "  line7", "  line8"]);
-	});
-
-	it("shows the traceback when the probe failed", async () => {
-		const lines = await collapsedLines({ ...base, exitCode: 1, stderr: "ValueError: boom\n" });
-		assert.deepEqual(lines, ["Exited 1 (595ms)", "  ValueError: boom"]);
-	});
-
-	it("does not let the environment note stand in for a missing answer", async () => {
-		const lines = await collapsedLines(base);
-		assert.deepEqual(lines, ["ok (595ms)"]);
-	});
-
-	it("keeps the two-sentence timeout advice on one line", async () => {
-		const lines = await collapsedLines({ ...base, timedOut: true, codeStarted: false, declaredDeps: 2 });
-		assert.equal(lines.length, 1);
-		const only = lines[0] ?? "";
-		assert.ok(only.length <= 80, `expected one short line, got ${only.length} chars`);
-	});
-
-	it("expands to the same text the model reads", async () => {
-		const details = { ...base, stdout: "{'providers': 225}\n" };
-		const { tool } = await loadTool();
-		const expanded = tool.renderResult({ details }, { expanded: true }, theme).render().join("\n");
-		assert.equal(expanded, render(details as any));
 	});
 });

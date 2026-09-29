@@ -19,11 +19,12 @@
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { keyHint, keyText, type ExtensionAPI, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { authorizeDeps, readDeclaredDeps } from "./src/deps.ts";
 import { DEFAULT_TIMEOUT_SEC, MAX_TIMEOUT_SEC, runProbe, type ProbeOutcome } from "./src/probe.ts";
 import { resolveWorkspace } from "./src/workspace.ts";
+import { callView, collapsedView, expandedView, textView, type ViewTheme } from "./src/view.ts";
 
 const ProbeParams = Type.Object({
 	code: Type.String({
@@ -63,6 +64,27 @@ function lines(...items: string[]): { render(): string[]; invalidate(): void } {
 	return {
 		render: () => items.flatMap((item) => item.split("\n")),
 		invalidate: () => {},
+	};
+}
+
+/**
+ * pi's theme, adapted to the view port.
+ *
+ * This is the one impure adapter in the repo, and it is here on purpose.
+ * `keyHint` reads process-global theme and keybinding state and throws outside
+ * a live TUI, so it is resolved at the edge, once, where a terminal exists.
+ * Everything behind the port is pure and can be tested in a bare process.
+ */
+function tuiTheme(theme: Theme): ViewTheme {
+	// `keyHint` is `key + " to expand"`, and it renders an empty key as a
+	// leading space rather than nothing. A registry that has not loaded yet
+	// would leave the line saying "5 earlier lines,  to expand" -- so the
+	// fallback carries the meaning without the gap.
+	const key = keyText("app.tools.expand");
+	return {
+		fg: (color, text) => theme.fg(color, text),
+		bold: (text) => theme.bold(text),
+		expandHint: key ? keyHint("app.tools.expand", "to expand") : "expand to see the rest",
 	};
 }
 
@@ -210,114 +232,27 @@ export default function (pi: ExtensionAPI) {
 
 			if (outcome.spawnError) throw new Error(outcome.spawnError);
 
-			// `details` carries the whole outcome, so the renderer and the
-			// model-facing text are both built from one object.
+			// `details` carries the whole outcome, so every rendering of this run
+			// -- the model's text, the shut view, the open view -- is built from
+			// one object.
 			const details = { ...outcome, code };
 
-			return { content: [{ type: "text", text: render(outcome) }], details };
+			return { content: [{ type: "text", text: textView(outcome) }], details };
 		},
 
-		// Both views are built from one decomposition of the outcome, so the
-		// status line, the trailing-newline trim, and the stderr label are each
-		// decided once.
+		// A probe can run for a minute with nothing on screen. Quoting the
+		// expression that will produce the value is what makes the wait legible.
+		renderCall(args, theme) {
+			return lines(callView(args as { code: string; timeout?: number }, tuiTheme(theme)));
+		},
+
+		// Both views and the model's text come out of the same decomposition, so
+		// the state label, the trailing-newline trim, and the stderr label are
+		// each decided once rather than per view.
 		renderResult(result, { expanded }, theme) {
-			const parts = renderParts(result.details as ProbeOutcome);
-			if (expanded) return lines(joinParts(parts));
-			return lines(...collapsed(parts, text => theme.fg("dim", text)));
+			const view = tuiTheme(theme);
+			const outcome = result.details as ProbeOutcome;
+			return lines(...(expanded ? expandedView(outcome, view) : collapsedView(outcome, view)));
 		},
 	});
-}
-
-const COLLAPSED_TAIL_LINES = 3;
-
-/**
- * The collapsed TUI line: status, then the tail of the answer.
- *
- * A probe's answer is its last line, so the tail is the value and the status
- * line is only a receipt. Leading with the receipt is what made a human
- * supervising a run see `ok (595ms)` and nothing else. Same shape as bash,
- * which previews the tail of real output rather than the exit code.
- */
-function collapsed(parts: RenderParts, dim: (text: string) => string): string[] {
-	// The status line is capped like the old first-line view: the timeout advice
-	// is two sentences, and a two-sentence collapsed line defeats the point of
-	// collapsing. The full text is one expand away.
-	const out = [dim(parts.status.length > 80 ? `${parts.status.slice(0, 79)}…` : parts.status)];
-	// stderr outranks stdout: a failing probe usually prints the traceback and
-	// nothing else, and that traceback is the whole diagnosis. The dropped-env
-	// note never appears here -- it is a standing fact about the sandbox, not a
-	// per-run result, and on a silent probe it would be the only thing shown.
-	const body = parts.stderr || parts.stdout;
-	if (!body) return out;
-	const all = body.split("\n");
-	const tail = all.slice(-COLLAPSED_TAIL_LINES);
-	out.push(...tail.map(line => `  ${line}`));
-	// Only worth saying when there is something above the cut to see.
-	if (all.length > tail.length) {
-		out.splice(1, 0, dim(`... ${all.length - tail.length} earlier lines, expand for all`));
-	}
-	return out;
-}
-
-/** Shape one probe's outcome as the text the model reads. Exported for tests. */
-export function render(outcome: ProbeOutcome): string {
-	return joinParts(renderParts(outcome));
-}
-
-/** The one place that decides labels and blank lines, so no caller has to. */
-function joinParts({ status, stdout, stderr, note }: RenderParts): string {
-	return [status, stdout, stderr && `stderr:\n${stderr}`, note].filter(Boolean).join("\n\n");
-}
-
-/**
- * A probe's outcome split by role, so a view picks by name and never by
- * position. Empty string means absent; `joinParts` is what turns that back
- * into text, and it owns the labels.
- */
-interface RenderParts {
-	status: string;
-	stdout: string;
-	stderr: string;
-	note: string;
-}
-
-function renderParts(outcome: ProbeOutcome): RenderParts {
-	let status: string;
-
-	if (outcome.timedOut) {
-		// Timed out installing and timed out computing need opposite advice.
-		// The runner touches a marker file the instant user code starts, so this
-		// is a fact rather than a guess about what uv printed.
-		const spentInstalling = !outcome.codeStarted && outcome.declaredDeps > 0;
-		status =
-			spentInstalling
-				? `Timed out after ${Math.round(outcome.durationMs / 1000)}s before the code ran. ` +
-						`${outcome.declaredDeps} package(s) were declared, so the budget went to ` +
-						"installing them. Retry with a higher timeout; the install is cached, so the " +
-						"retry gets the whole budget for the code."
-				: `Timed out after ${Math.round(outcome.durationMs / 1000)}s and was killed. ` +
-						"Raise the timeout if the work is legitimate, or narrow the code.";
-	} else if (outcome.aborted) {
-		status = "Cancelled before it finished.";
-	} else if (outcome.exitCode === 0) {
-		status = `ok (${outcome.durationMs}ms)`;
-	} else {
-		status = `Exited ${outcome.exitCode} (${outcome.durationMs}ms)`;
-	}
-
-	return {
-		status,
-		stdout: outcome.stdout.replace(/\n$/, ""),
-		// uv writes install and resolution progress here, so it is only worth
-		// showing when something actually went wrong or needs installing.
-		stderr: outcome.stderr.trim() ? outcome.stderr.replace(/\n$/, "") : "",
-		note:
-			outcome.droppedEnv.length > 0
-				? // Scoped claim on purpose. The environment is built from a fixed list,
-					// so a probe cannot read these -- but it runs as you and can still open
-					// a file under your home directory, which is a different thing entirely.
-					`Note: probe did not pass through ${outcome.droppedEnv.join(", ")}, so its ` +
-					"environment does not carry those values."
-				: "",
-	};
 }

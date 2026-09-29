@@ -77,6 +77,45 @@ remote data. The directory is mode `0700`, re-validated on every call, and a
 pre-planted symlink or a directory you do not own is refused (fresh random
 fallback). Workspaces left untouched for two weeks are pruned automatically.
 
+## What a probe looks like
+
+While one runs, the call line quotes the expression that will produce the
+answer, so a minute of waiting is not a blank screen:
+
+```
+probe  df.groupby("region")["amount"].sum()  (timeout 120s)
+```
+
+When it finishes, the last few lines are the result and the timing is a
+footnote. Expand it (ctrl+O) for the whole thing.
+
+```
+  {'EMEA': 412000, 'APAC': 288000, 'AMER': 195000}
+  ... 4 earlier lines, Ctrl+O to expand
+  ok · 1.4s
+```
+
+A failure shows the traceback instead of the answer, in red — that is the
+diagnosis, and it is the part you want:
+
+```
+  ValueError: 'amount' is not a column
+  Exited 1 · 0.3s
+```
+
+If it times out, the advice names a number you can actually pass back:
+
+```
+  [timed out after 1m 0s installing 2 package(s) — the code never ran]
+  Retry with timeout:180 — the install is cached
+  timed out · 1m 0s
+```
+
+The distinction the display is making is routine versus abnormal. A probe that
+raises is the tool working — you asked it a question and it told you the
+answer was no. A probe that times out, or whose output hit the 200KB capture
+limit, is the tool failing, and it says so.
+
 ## Configuration
 
 Copy `probe.config.example.json` to `probe.config.json` next to the extension
