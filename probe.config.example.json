@@ -1,0 +1,23 @@
+{
+	"$comment": "Copy to probe.config.json. pi-probe reads it from next to the extension; set PI_PROBE_CONFIG to point elsewhere. This file is gitignored -- yours is yours, and an allowlist is a personal decision, not a shared one.",
+
+	"allowedPackages": [
+		"pandas",
+		"numpy",
+		"requests",
+		"httpx",
+		"rich",
+		"pydantic",
+		"beautifulsoup4",
+		"lxml",
+		"pillow",
+		"matplotlib",
+		"jinja2",
+		"pyyaml",
+		"tabulate",
+		"dateutil"
+	],
+
+	"$comment_extraEnv": "Environment variable NAMES to pass through. Secret-shaped names are refused even if listed here, so this is for things like a proxy or a colour setting, never a token. See the README for why.",
+	"extraEnv": ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "TZ", "LANG"]
+}

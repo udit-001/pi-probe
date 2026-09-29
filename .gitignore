@@ -1,0 +1,7 @@
+node_modules/
+.pi/
+*.log
+
+# Local allowlist. Commit probe.config.example.json instead; this file is
+# yours, and it is the only place a package or env var gets blessed.
+probe.config.json

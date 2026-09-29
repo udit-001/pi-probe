@@ -1,0 +1,42 @@
+{
+  "name": "pi-probe",
+  "version": "0.1.0",
+  "description": "Throwaway Python probes for pi: one call, fresh process, nothing left behind",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "python",
+    "uv",
+    "repl"
+  ],
+  "files": [
+    "index.ts",
+    "src",
+    "probe.config.example.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --test-concurrency=1 \"tests/**/*.test.ts\""
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.85.1",
+    "@types/node": "^22.20.4",
+    "typebox": "^1.3.27",
+    "typescript": "^5.7.0"
+  }
+}
