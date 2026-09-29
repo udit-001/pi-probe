@@ -213,3 +213,25 @@ import rich
 		assert.equal(withDeps.declaredDeps, 1);
 	});
 });
+
+describe("what counts as a trailing expression", () => {
+	it("prints the value of a top-level expression", async () => {
+		const r = await run("2 + 2\n");
+		assert.equal(r.stdout.trim(), "4");
+	});
+
+	it("prints nothing for an expression nested inside a block, like a REPL", async () => {
+		// Matched to a block, it is not a top-level statement, so the REPL rule
+		// applies and nothing prints. This is documented in the tool description
+		// because the alternative -- silence that looks like a failed probe -- is
+		// the kind of thing a model cannot debug from the result alone.
+		const r = await run('try:\n    "inside"\nexcept Exception:\n    pass\n');
+		assert.equal(r.exitCode, 0);
+		assert.equal(r.stdout.trim(), "");
+	});
+
+	it("still prints when a top-level expression follows a block", async () => {
+		const r = await run('for i in range(3):\n    pass\n"after the block"\n');
+		assert.equal(r.stdout.trim(), "'after the block'");
+	});
+});

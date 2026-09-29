@@ -85,8 +85,9 @@ Use this to check a value, see how a library behaves, inspect data, or try an id
 before writing it into a file. The code is self-contained and each call starts
 from a clean process.
 
-The value of the last expression is printed for you, so end with the thing you
-want to see rather than wrapping it in print().
+The value of a final top-level expression is printed for you, so end with the thing
+you want to see rather than wrapping it in print(). An expression indented inside
+a for, if, or try block is not top-level and prints nothing.
 
 To use third-party packages, declare them in a header at the very top:
 

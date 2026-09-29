@@ -46,8 +46,9 @@ df = pd.read_csv("sales.csv")
 df.groupby("region")["amount"].sum().sort_values(ascending=False)
 ```
 
-The result of the last expression is printed, so you get the answer without
-wrapping it.
+The result of a final top-level expression is printed, so you get the answer
+without wrapping it. An expression indented inside a `for`, `if`, or `try`
+block is not top-level, and prints nothing.
 
 Cells are independent. If the third one needs the DataFrame the second one
 built, it has to build it again.
