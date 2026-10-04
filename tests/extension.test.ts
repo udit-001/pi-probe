@@ -57,7 +57,18 @@ describe("the probe tool as the model sees it", () => {
 
 	it("tells the model to end with the expression it wants to see", async () => {
 		const { tool } = await loadTool();
-		assert.match(tool.description, /last expression/);
+		assert.match(tool.description, /last (top-level )?expression/);
+	});
+
+	it("names the jobs an agent actually brings to it", async () => {
+		const { tool } = await loadTool();
+		// The branch list is the trigger. Observed leaks to `python -c` were
+		// dominated by database queries, then JSON inspection, then URL fetches;
+		// a description that lists none of them leaves the model with no reason
+		// to reach here instead of the shell.
+		assert.match(tool.description, /sqlite3/);
+		assert.match(tool.description, /JSON/);
+		assert.match(tool.description, /fetch a URL/);
 	});
 
 	it("routes edits and real files away from itself", async () => {

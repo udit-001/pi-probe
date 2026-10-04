@@ -1,5 +1,5 @@
 /**
- * probe -- run throwaway Python and get the answer.
+ * probe -- query anything with Python and get the answer back, in one call.
  *
  * The tool surface is deliberately one call with one argument. Everything
  * else -- a scratch directory, a fresh process, a bounded environment, a
@@ -143,24 +143,29 @@ async function loadConfig(): Promise<ResolvedConfig> {
 	}
 }
 
-const DESCRIPTION = `Run throwaway Python and get the answer, in one call.
+const DESCRIPTION = `Query anything with Python and get the answer back, in one call.
 
-Use this to check a value, see how a library behaves, inspect data, or try an idea
-before writing it into a file. For edits use edit; for code that is not throwaway,
-write a file and run it.
+Reach for this whenever the answer is a value behind structured data, or a question only
+Python can answer:
+- query a database: sqlite3, or any DB-API driver you declare
+- inspect a JSON, config, or log file: its shape, its keys, one record
+- fetch a URL and parse the response
+- introspect a library: what it exports, what a signature looks like
+- compute or check anything: arithmetic, dates, encodings, regex, parsing
 
-Fresh every call: each probe is a new process with an empty namespace. WORKSPACE is
-the one thing the tool carries between calls -- a scratch directory tied to this
-session, which survives a resume until the OS cleans the temp dir; a new session
-gets fresh scratch. Do an expensive step once (a fetch, a slow parse), write its
-result there, and read it back in later probes instead of redoing the step:
+For edits use edit; for code you want to keep, write a file and run it.
+
+One call is a fresh process with an empty namespace, so a cell carries its own imports, and
+the value of its last top-level expression is returned to you -- no print(), no temp file:
+
+    df.head()          # this row is the answer
+
+WORKSPACE is the scratch directory for this session, and the only thing a cell leaves
+behind. Do an expensive step once (a fetch, a slow parse) and read it back in a later cell
+instead of redoing it:
 
     with open(os.path.join(WORKSPACE, "models.json"), "w") as f: json.dump(data, f)
     data = json.load(open(os.path.join(WORKSPACE, "models.json")))
-
-End with the thing you want to see. The value of the last expression is printed
-for you when it is top-level, so you need no print() around it. An expression
-indented inside a for, if, or try block is not top-level and prints nothing.
 
 Third-party packages go in a PEP 723 header at the very top, and you approve each
 new package once per session (URLs and local paths are refused):
@@ -169,12 +174,10 @@ new package once per session (URLs and local paths are refused):
     # dependencies = ["pandas"]
     # ///
     import pandas as pd
-    print(pd.read_csv("data.csv").shape)
 
-The environment is stdlib Python under uv. A fetch is plain urllib; a server that
-answers 403 usually wants a browser User-Agent header. A crash still returns
-everything printed before it, so fix the tail and rerun instead of rewriting the
-whole probe.`;
+A crash still returns everything printed before it, so fix the tail and rerun. The
+environment is stdlib Python under uv: a fetch is plain urllib, and a server that
+answers 403 usually wants a browser User-Agent header.`;
 
 /**
  * The stable identity a workspace is keyed to: the pi session id, falling
@@ -211,10 +214,10 @@ export default function (pi: ExtensionAPI) {
 		name: "probe",
 		label: "Python probe",
 		description: DESCRIPTION,
-		promptSnippet: "probe: run throwaway Python for an answer, in a fresh process; WORKSPACE carries scratch between calls",
+		promptSnippet: "probe: query a database, a JSON file, or a URL with Python and get the answer back",
 		promptGuidelines: [
-			"Prefer probe over write-then-run when the code is throwaway: it is one call instead of three.",
-			"Do an expensive step once and reuse it across probes: write the result to WORKSPACE, read it back in the next probe. Everything else restarts each call.",
+			"Any question whose answer lives in a database, a JSON or config file, or an API response goes to probe: one call, the answer returned, no temp file.",
+			"An expensive step runs once: write the result to WORKSPACE and read it back in a later cell. Nothing else survives a call.",
 		],
 		parameters: ProbeParams,
 		// Cells are independent, so parallel calls are safe and a batch of
