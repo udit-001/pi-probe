@@ -37,26 +37,29 @@ hand to a model, so changes are judged against them.
    directory on any doubt -- a planted path is never reused, and the
    workspace must never resolve to the working directory, where a probe
    writing "somewhere safe" would silently litter the project.
-5. **Windows is supported, and CI proves it.** The kill path uses `taskkill /T /F`, and the
-   uid and mode-0700 ownership checks degrade there (ACLs, not POSIX bits,
-   are the boundary; the workspace must still be a plain, non-symlink
-   directory we created or verified). The matrix in
-   `.github/workflows/ci.yml` runs the suite on ubuntu and windows for
-   every push and PR -- a Windows-support regression is a red build, not a
-   silent fallback. A Windows-behavior change that has not seen a green run
-   there is still treated as unverified until it has.
+5. **Windows is supported, and CI proves it.** The kill path uses `taskkill
+   /T /F`, and the uid and mode-0700 ownership checks degrade there (ACLs,
+   not POSIX bits, are the boundary; the workspace must still be a plain,
+   non-symlink directory we created or verified). The matrix in
+   `.github/workflows/ci.yml` runs the suite on ubuntu and windows for every
+   push and PR -- a Windows-support regression is a red build, not a silent
+   fallback. A Windows-behavior change is unverified until a green run there
+   has covered it.
 
 ## Where things live
 
 - `src/probe.ts` -- one call: spawn, bounded head-and-tail capture, kill the
-  whole tree on timeout or abort.
+  whole tree on timeout or abort. The capture boundary is also where
+  platform newline noise dies (`normalizeNewlines`): every consumer downstream
+  reads `\n`, and byte accounting stays raw.
 - `src/env.ts` and `src/deps.ts` -- invariants 3 and 2: the child env and the
   declaration gate, each testable on its own.
 - `src/workspace.ts` -- invariant 4: identity-keyed, validated session
   scratch with stale pruning.
 - `src/runner.ts` -- the Python preamble: REPL-style last-expression output,
   traceback lines that point at the user's code, WORKSPACE handed into the
-  cell namespace.
+  cell namespace, and the output protocol's newline half pinned (`reconfigure`),
+  so Windows text mode cannot double-translate what a cell wrote.
 - `src/view.ts` -- every rendering of one outcome: the model's text, the shut
   and open TUI views, and the call line, each laid out to a width the host
   supplies. The state classification, the duration format, the label
