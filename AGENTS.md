@@ -37,9 +37,11 @@ hand to a model, so changes are judged against them.
    directory on any doubt -- a planted path is never reused, and the
    workspace must never resolve to the working directory, where a probe
    writing "somewhere safe" would silently litter the project.
-5. **Windows is best-effort.** The kill path uses `taskkill /T /F` and the
-   uid check is skipped (`process.getuid` does not exist there); the suite
-   only runs on Linux. Windows-specific paths are treated as unverified.
+5. **Windows is best-effort.** The kill path uses `taskkill /T /F`, and the
+   uid and mode-0700 ownership checks degrade there (ACLs, not POSIX bits,
+   are the boundary; the workspace must still be a plain, non-symlink
+   directory we created or verified). The suite only runs on Linux.
+   Windows-specific paths are treated as unverified.
 
 ## Where things live
 

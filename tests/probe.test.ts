@@ -27,7 +27,7 @@ describe("runProbe", () => {
 		assert.equal(r.exitCode, 0);
 		const ws = r.stdout.trim();
 		assert.notEqual(ws, here); // not cwd: a silent probe write must not litter the project
-		assert.ok(ws.startsWith("/tmp/pi-probe-") || ws.startsWith(process.env.TMPDIR ?? "/tmp/"));
+		assert.ok(ws.startsWith(join(tmpdir(), "pi-probe-")));
 	});
 
 	it("exposes the workspace to the cell as WORKSPACE and as an env var", async () => {

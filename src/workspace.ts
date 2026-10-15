@@ -36,6 +36,15 @@ const OWNER_MODE = 0o700;
 
 const myUid = typeof process.getuid === "function" ? process.getuid() : undefined;
 
+/**
+ * On Windows, lstat mode bits come from ACL mapping, not POSIX permission
+ * bits, so the 0o700 equality would reject every legitimate workspace -- the
+ * same reason the uid check above degrades. Like the uid check, the check is
+ * skipped rather than broken: adoption still requires a plain, non-symlink
+ * directory, and on Windows the parent's ACLs remain the real boundary.
+ */
+const modeCheckApplies = process.platform !== "win32";
+
 /** A session id is a UUID; custom ids get sanitized so a path can never escape. */
 function sanitizeIdentity(identity: string): string {
 	return identity
@@ -61,7 +70,7 @@ async function ensureOwnedDir(path: string): Promise<boolean> {
 		const st = await lstat(path);
 		if (!st.isDirectory()) return false; // includes symlinks and files
 		if (myUid !== undefined && st.uid !== myUid) return false;
-		if ((st.mode & 0o777) !== OWNER_MODE) return false;
+		if (modeCheckApplies && (st.mode & 0o777) !== OWNER_MODE) return false;
 		return true;
 	} catch {
 		return false;
