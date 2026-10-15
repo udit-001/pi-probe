@@ -75,6 +75,19 @@ function decodeTruncated(buf: Buffer): string {
 }
 
 /**
+ * Normalize the child's newlines to \n at the text boundary.
+ *
+ * Windows Python translates every \n to \r\n, and progress-style output can
+ * emit a lone \r; every consumer of these strings -- the views, the tests,
+ * the model -- wants text, not platform newline noise. The buffer's byte
+ * accounting stays raw: the cap counts bytes as they arrived, and only the
+ * strings that leave the module are converted.
+ */
+function normalizeNewlines(text: string): string {
+	return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
+/**
  * Bounded output that keeps both ends.
  *
  * Head-and-tail, not head-only, because the part of a probe that matters is
@@ -300,8 +313,8 @@ export async function runProbe(options: RunProbeOptions): Promise<ProbeOutcome> 
 		);
 
 		return {
-			stdout: stdout.text(),
-			stderr: stderr.text(),
+			stdout: normalizeNewlines(stdout.text()),
+			stderr: normalizeNewlines(stderr.text()),
 			exitCode: outcome.exitCode,
 			spawnError: outcome.spawnError,
 			timedOut,

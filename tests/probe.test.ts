@@ -30,6 +30,18 @@ describe("runProbe", () => {
 		assert.ok(ws.startsWith(join(tmpdir(), "pi-probe-")));
 	});
 
+	it("normalizes the child's CRLF newlines so Windows output reads as text", async () => {
+		// Linux Python writes \r\n literally; Windows Python translates every
+		// \n to \r\n. Either way the captured strings arrive as \n: newline
+		// noise is the capture boundary's problem, not every consumer's.
+		const r = await run(
+			"import sys\nsys.stdout.write('a\\r\\nb\\r\\n')\n_ = sys.stderr.write('e\\r\\nc')\n",
+		);
+		assert.equal(r.exitCode, 0);
+		assert.equal(r.stdout, "a\nb\n");
+		assert.equal(r.stderr, "e\nc");
+	});
+
 	it("exposes the workspace to the cell as WORKSPACE and as an env var", async () => {
 		const ws = await sharedWorkspace();
 		try {
