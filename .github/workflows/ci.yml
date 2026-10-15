@@ -1,0 +1,39 @@
+# CI for pi-probe.
+#
+# The suite runs real Python through uv, so both legs need Node, Python, and
+# uv. Windows is a required leg, not a best-effort one: the workspace
+# ownership checks degrade on win32 by design (see AGENTS.md invariant 5),
+# and this matrix is what keeps that degradation honest -- a Windows-support
+# regression is a red build, not a silent fallback.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
