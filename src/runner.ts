@@ -30,6 +30,14 @@
 export function buildRunner(userPath: string, metadataBlock: string, startedPath?: string): string {
 	const preamble = `import ast as _pa, os as _po, sys as _ps
 
+# Pin the output protocol's newline half: unbuffered and UTF-8 come from the
+# parent's env (PYTHONUNBUFFERED, PYTHONIOENCODING), but Windows text mode
+# would still translate every \\n to \\r\\n -- and a literal \\r\\n written by
+# a cell to \\r\\r\\n. The parent normalizes what it captures; not
+# double-translating is the child's half of that contract.
+_ps.stdout.reconfigure(newline="\\n")
+_ps.stderr.reconfigure(newline="\\n")
+
 # The probe workspace: the one thing that outlives a probe. WORKSPACE is a
 # tool-owned scratch directory that survives until the session ends, so an
 # expensive step (a fetch, a slow parse) can run once, land here, and be read
