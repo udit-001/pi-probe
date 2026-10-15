@@ -37,11 +37,14 @@ hand to a model, so changes are judged against them.
    directory on any doubt -- a planted path is never reused, and the
    workspace must never resolve to the working directory, where a probe
    writing "somewhere safe" would silently litter the project.
-5. **Windows is best-effort.** The kill path uses `taskkill /T /F`, and the
+5. **Windows is supported, and CI proves it.** The kill path uses `taskkill /T /F`, and the
    uid and mode-0700 ownership checks degrade there (ACLs, not POSIX bits,
    are the boundary; the workspace must still be a plain, non-symlink
-   directory we created or verified). The suite only runs on Linux.
-   Windows-specific paths are treated as unverified.
+   directory we created or verified). The matrix in
+   `.github/workflows/ci.yml` runs the suite on ubuntu and windows for
+   every push and PR -- a Windows-support regression is a red build, not a
+   silent fallback. A Windows-behavior change that has not seen a green run
+   there is still treated as unverified until it has.
 
 ## Where things live
 
