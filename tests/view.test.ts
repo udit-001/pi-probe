@@ -90,6 +90,14 @@ describe("the call line, which is the only thing on screen while a probe runs", 
 		assert.equal(callView({ code: "1\n" }, identity, ROOMY), "probe  1");
 	});
 
+	it("renders a placeholder instead of crashing on a call still being constructed", () => {
+		// pi renders a tool call while its arguments are still streaming in;
+		// a missing code field is a pending receipt, not a render-time error.
+		// This crash took down a live pi session (uncaughtException in TUI render).
+		assert.equal(callView({} as { code: string; timeout?: number }, identity, ROOMY), "probe  …");
+		assert.equal(callView(undefined as unknown as { code: string; timeout?: number }, identity, ROOMY), "probe  …");
+	});
+
 	it("clips a long expression instead of taking over the line", () => {
 		const line = callView({ code: `x = ${"a".repeat(200)}\n` }, identity, ROOMY);
 		assert.ok(line.length < 80, `expected a short line, got ${line.length} chars`);

@@ -286,7 +286,9 @@ export default function (pi: ExtensionAPI) {
 		// mid-run is a worse receipt than one that ends in an ellipsis.
 		renderCall(args, theme) {
 			const port = tuiPort(theme);
-			return viewLines(width => [callView(args as { code: string; timeout?: number }, port, width)]);
+			// pi can render a call while its arguments are still streaming in;
+			// callView renders that as a pending receipt rather than crashing.
+			return viewLines(width => [callView(args as { code?: string; timeout?: number }, port, width)]);
 		},
 
 		// Both views and the model's text come out of the same decomposition, so
@@ -294,7 +296,11 @@ export default function (pi: ExtensionAPI) {
 		// each decided once rather than per view.
 		renderResult(result, { expanded }, theme) {
 			const port = tuiPort(theme);
-			const outcome = result.details as ProbeOutcome;
+			// Same mid-construction caveat as renderCall: a result whose details
+			// have not landed yet gets an empty frame, not an uncaught TypeError
+			// three layers inside a view.
+			const outcome = result.details as ProbeOutcome | undefined;
+			if (!outcome) return viewLines(() => []);
 			return viewLines(width => (expanded ? expandedView(outcome, port, width) : collapsedView(outcome, port, width)));
 		},
 	});

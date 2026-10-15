@@ -316,14 +316,18 @@ function renderAdvisories(advisories: Advisory[], port: ViewPort, width: number,
  * end with the thing you want to see. Leading with the imports would quote
  * the setup; leading with the dependency header would quote nothing at all.
  */
-export function callView(args: { code: string; timeout?: number }, port: ViewPort, width: number): string {
-	const summaryLine = args.code
+export function callView(args: { code?: string; timeout?: number } | undefined, port: ViewPort, width: number): string {
+	// pi renders a tool call while its arguments are still streaming in, so
+	// `code` (and, at least once, `args` itself) can be absent at render time.
+	// A pending receipt is the honest rendering; a crash mid-frame takes the
+	// whole TUI down with it.
+	const summaryLine = (args?.code ?? "")
 		.split("\n")
 		.map(line => line.trim())
 		.filter(line => line.length > 0 && !line.startsWith("#"))
 		.pop();
 
-	const suffix = args.timeout === undefined ? "" : ` (timeout ${args.timeout}s)`;
+	const suffix = args?.timeout === undefined ? "" : ` (timeout ${args.timeout}s)`;
 	// Whatever the terminal leaves once the fixed parts of the line are paid
 	// for, capped by taste: a call line is a receipt, not a listing.
 	const budget = Math.max(1, Math.min(CALL_SUMMARY_CHARS, width - CALL_PREFIX.length - suffix.length));
